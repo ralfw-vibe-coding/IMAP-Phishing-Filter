@@ -2,6 +2,11 @@ import "dotenv/config";
 import { z } from "zod";
 import { buildImapAccountConfigFromEnvShape, startImapWatcher } from "./imap.js";
 
+const ANSI = {
+  green: "\u001b[32m",
+  reset: "\u001b[0m",
+} as const;
+
 const envAccountsSchema = z.array(
   z.object({
     label: z.string().min(1),
@@ -29,36 +34,74 @@ function loadAccountsFromEnv() {
   return envAccounts.map(buildImapAccountConfigFromEnvShape);
 }
 
+function envFlag(name: string, defaultValue: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultValue;
+  const v = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(v)) return true;
+  if (["0", "false", "no", "n", "off"].includes(v)) return false;
+  throw new Error(`Invalid boolean env ${name}="${raw}" (use true/false)`);
+}
+
+function envInt(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultValue;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`Invalid integer env ${name}="${raw}"`);
+  return n;
+}
+
 async function main() {
   // eslint-disable-next-line no-console
-  console.log(`[main] starting at ${new Date().toISOString()}`);
+  console.log(`${ANSI.green}[main] starting at ${new Date().toISOString()}${ANSI.reset}`);
 
   const accounts = loadAccountsFromEnv();
   // eslint-disable-next-line no-console
-  console.log(`[main] loaded ${accounts.length} IMAP account(s): ${accounts.map((a) => a.label).join(", ")}`);
+  console.log(
+    `${ANSI.green}[main] loaded ${accounts.length} IMAP account(s): ${accounts.map((a) => a.label).join(", ")}${ANSI.reset}`,
+  );
 
-  const watchers = accounts.map((account) => startImapWatcher(account));
+  const scanOnStart = envFlag("IMAP_SCAN_ON_START", false);
+  const scanMax = Math.min(10, envInt("IMAP_SCAN_ON_START_MAX", 10));
+  // eslint-disable-next-line no-console
+  console.log(`${ANSI.green}[main] IMAP_SCAN_ON_START=${scanOnStart} IMAP_SCAN_ON_START_MAX=${scanMax}${ANSI.reset}`);
+
+  const watchers = accounts.map((account) =>
+    startImapWatcher(account, { scanOnStart, scanOnStartMax: scanMax }),
+  );
   await Promise.all(watchers.map((w) => w.ready));
 
   // eslint-disable-next-line no-console
-  console.log("[main] all watchers connected at least once");
+  console.log(`${ANSI.green}[main] all watchers connected at least once${ANSI.reset}`);
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) {
+      // eslint-disable-next-line no-console
+      console.log(`[main] shutdown already in progress (${signal}), forcing exit`);
+      process.exit(1);
+    }
+    shuttingDown = true;
     // eslint-disable-next-line no-console
-    console.log(`[main] shutdown requested (${signal})`);
+    console.log(`${ANSI.green}[main] shutdown requested (${signal})${ANSI.reset}`);
+    const forceTimer = setTimeout(() => {
+      // eslint-disable-next-line no-console
+      console.log(`${ANSI.green}[main] shutdown timed out, forcing exit${ANSI.reset}`);
+      process.exit(1);
+    }, 10_000);
     await Promise.allSettled(watchers.map((w) => w.stop()));
+    clearTimeout(forceTimer);
     // eslint-disable-next-line no-console
-    console.log("[main] shutdown complete");
+    console.log(`${ANSI.green}[main] shutdown complete${ANSI.reset}`);
     process.exit(0);
   };
 
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 void main().catch((err) => {
   // eslint-disable-next-line no-console
-  console.error("[main] fatal error", err);
+  console.error(`${ANSI.green}[main] fatal error${ANSI.reset}`, err);
   process.exit(1);
 });
-
