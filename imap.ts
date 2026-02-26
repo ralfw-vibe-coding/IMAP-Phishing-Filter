@@ -135,14 +135,14 @@ export function startImapWatcher(
 
           const subject = parsed.subject ?? msg.envelope?.subject ?? "";
 
-          const body =
-            parsed.text ??
-            (typeof parsed.html === "string" ? parsed.html : "") ??
-            "";
+          const body = parsed.text ?? "";
+          if (!body) {
+            log(account.label, `UID ${uid}: no text body found (html ignored)`);
+          }
 
           log(account.label, `UID ${uid}: parsed from="${from}" subject="${subject}"`);
 
-          const result = checkForPhishingAttempt(from ?? "", to, subject, body);
+          const result = await checkForPhishingAttempt(from ?? "", to, subject, body);
           const treat = shouldTreatAsPhishingAttempt(result);
 
           log(

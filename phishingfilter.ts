@@ -3,60 +3,39 @@ export type PhishingCheckResult = {
   explanation: string;
 };
 
-export function checkForPhishingAttempt(
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { runPhishingAssessmentPrompt } from "./ai.js";
+
+const PROMPT_PATH = resolve(process.cwd(), "phishingdetection_prompt.txt");
+let cachedPromptTemplate: string | null = null;
+
+async function loadPromptTemplate(): Promise<string> {
+  if (cachedPromptTemplate !== null) return cachedPromptTemplate;
+  cachedPromptTemplate = await readFile(PROMPT_PATH, "utf8");
+  return cachedPromptTemplate;
+}
+
+function buildEmailBlock(args: { from: string; to: string; subject: string; body: string }) {
+  return [
+    `from: ${args.from}`,
+    `to: ${args.to}`,
+    `subject: ${args.subject}`,
+    `body: ${args.body}`,
+  ].join("\n");
+}
+
+export async function checkForPhishingAttempt(
   from: string,
   to: string,
   subject: string,
   body: string,
-): PhishingCheckResult {
-  const reasons: string[] = [];
-  let score = 0;
+): Promise<PhishingCheckResult> {
+  const template = await loadPromptTemplate();
+  const email = buildEmailBlock({ from, to, subject, body });
 
-  const subjectLower = subject.toLowerCase();
-  const bodyLower = body.toLowerCase();
-
-  if (subjectLower.includes("phishing")) {
-    return {
-      probability: 1,
-      explanation: 'Subject contains keyword "phishing".',
-    };
-  }
-
-  const urgentSignals = ["dringend", "sofort", "urgent", "immediately", "account", "konto", "passwort", "password"];
-  const threatSignals = ["gesperrt", "suspended", "blocked", "deaktiviert", "disabled", "unauthorized", "unbefugt"];
-  const actionSignals = ["anmelden", "login", "verify", "bestätigen", "validate", "update", "aktualisieren"];
-
-  const urlMatches = bodyLower.match(/\bhttps?:\/\/[^\s)>"']+/g) ?? [];
-
-  const add = (points: number, reason: string) => {
-    score += points;
-    reasons.push(reason);
-  };
-
-  if (urgentSignals.some((s) => subjectLower.includes(s) || bodyLower.includes(s))) {
-    add(0.2, "Urgency/Account language detected");
-  }
-  if (threatSignals.some((s) => subjectLower.includes(s) || bodyLower.includes(s))) {
-    add(0.2, "Threat/lockout language detected");
-  }
-  if (actionSignals.some((s) => subjectLower.includes(s) || bodyLower.includes(s))) {
-    add(0.15, "Call-to-action language detected");
-  }
-  if (urlMatches.length > 0) {
-    add(Math.min(0.25, 0.1 + urlMatches.length * 0.03), `Contains ${urlMatches.length} link(s)`);
-  }
-  if (from.includes("<") || from.includes(">")) {
-    add(0.05, "From field looks like a display-name + address format");
-  }
-  if (to.length === 0) {
-    add(0.05, "Missing To information");
-  }
-
-  const probability = Math.max(0, Math.min(1, score));
-  const explanation =
-    reasons.length > 0 ? reasons.join("; ") : "No strong phishing indicators found (baseline heuristic).";
-
-  return { probability, explanation };
+  const prompt = template.includes("$email") ? template.replace("$email", email) : `${template}\n\n${email}`;
+  return runPhishingAssessmentPrompt(prompt);
 }
 
 export function shouldTreatAsPhishingAttempt(result: PhishingCheckResult): boolean {
