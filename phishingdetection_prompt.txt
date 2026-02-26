@@ -13,7 +13,9 @@ Here are criteria which increase the likelihood of the email being a phishing at
 
 1. The email instills a sense or urgency.
 2. The email's origin according to the text (body) does not match the sender (from).
-3. The email contains a link the user should click which does not match the sender (from) and/or the origin.
+3. The email contains a link the user should click which does not match the sender (from).
+4. The email contains a link the user should click which does not match the origin (body).
+5. The email contains pretty much just an image and a link to click.
 
 Email:
 $email
