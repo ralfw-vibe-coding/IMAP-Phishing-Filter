@@ -15,6 +15,13 @@ export function checkForPhishingAttempt(
   const subjectLower = subject.toLowerCase();
   const bodyLower = body.toLowerCase();
 
+  if (subjectLower.includes("phishing")) {
+    return {
+      probability: 1,
+      explanation: 'Subject contains keyword "phishing".',
+    };
+  }
+
   const urgentSignals = ["dringend", "sofort", "urgent", "immediately", "account", "konto", "passwort", "password"];
   const threatSignals = ["gesperrt", "suspended", "blocked", "deaktiviert", "disabled", "unauthorized", "unbefugt"];
   const actionSignals = ["anmelden", "login", "verify", "bestätigen", "validate", "update", "aktualisieren"];
@@ -55,4 +62,3 @@ export function checkForPhishingAttempt(
 export function shouldTreatAsPhishingAttempt(result: PhishingCheckResult): boolean {
   return result.probability > 0.5;
 }
-
