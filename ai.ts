@@ -5,11 +5,6 @@ export type AiPhishingAssessment = {
   explanation: string;
 };
 
-const ANSI = {
-  green: "\u001b[32m",
-  reset: "\u001b[0m",
-} as const;
-
 function now() {
   return new Date().toISOString();
 }
@@ -17,11 +12,11 @@ function now() {
 function log(message: string, extra?: unknown) {
   if (extra !== undefined) {
     // eslint-disable-next-line no-console
-    console.log(`${ANSI.green}[${now()}] [ai] ${message}${ANSI.reset}`, extra);
+    console.log(`[${now()}] [ai] ${message}`, extra);
     return;
   }
   // eslint-disable-next-line no-console
-  console.log(`${ANSI.green}[${now()}] [ai] ${message}${ANSI.reset}`);
+  console.log(`[${now()}] [ai] ${message}`);
 }
 
 function extractJsonObject(text: string): string {

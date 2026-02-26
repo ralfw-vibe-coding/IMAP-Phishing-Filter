@@ -24,18 +24,17 @@ const now = () => new Date().toISOString();
 
 const ANSI = {
   red: "\u001b[31m",
-  green: "\u001b[32m",
   reset: "\u001b[0m",
 } as const;
 
 function log(accountLabel: string, message: string, extra?: unknown) {
   if (extra !== undefined) {
     // eslint-disable-next-line no-console
-    console.log(`${ANSI.green}[${now()}] [${accountLabel}] ${message}${ANSI.reset}`, extra);
+    console.log(`[${now()}] [${accountLabel}] ${message}`, extra);
     return;
   }
   // eslint-disable-next-line no-console
-  console.log(`${ANSI.green}[${now()}] [${accountLabel}] ${message}${ANSI.reset}`);
+  console.log(`[${now()}] [${accountLabel}] ${message}`);
 }
 
 function logPhishing(accountLabel: string, message: string, extra?: unknown) {
@@ -75,6 +74,7 @@ export async function listMailboxFolders(client: ImapFlow): Promise<string[]> {
 }
 
 async function handlePhishingEmail(args: {
+  uid: number;
   accountLabel: string;
   from: string;
   subject: string;
@@ -82,9 +82,52 @@ async function handlePhishingEmail(args: {
 }) {
   logPhishing(
     args.accountLabel,
-    `PHISHING (p=${args.result.probability.toFixed(2)}): from="${args.from}" subject="${args.subject}"`,
+    `PHISHING UID ${args.uid} (p=${args.result.probability.toFixed(2)}): from="${args.from}" subject="${args.subject}"`,
   );
   logPhishing(args.accountLabel, `Explanation: ${args.result.explanation}`);
+}
+
+async function flagPhishingMessages(args: {
+  client: ImapFlow;
+  uids: number[];
+  accountLabel: string;
+  context: string;
+}) {
+  if (args.uids.length === 0) return;
+  const unique = Array.from(new Set(args.uids)).sort((a, b) => a - b);
+  try {
+    logPhishing(
+      args.accountLabel,
+      `Flagging ${unique.length} message(s) as \\\\Flagged (context=${args.context})...`,
+    );
+    const ok = await args.client.messageFlagsAdd(unique, ["\\Flagged"], { uid: true });
+    logPhishing(
+      args.accountLabel,
+      `Flagged ${unique.length} message(s) as \\\\Flagged (context=${args.context}) ok=${ok}`,
+    );
+    if (!ok) {
+      logPhishing(
+        args.accountLabel,
+        `Batch flagging returned ok=false; retrying individually (context=${args.context})`,
+      );
+      for (const uid of unique) {
+        try {
+          const okOne = await args.client.messageFlagsAdd(uid, ["\\Flagged"], { uid: true });
+          logPhishing(args.accountLabel, `Flagged UID ${uid} individually ok=${okOne}`);
+        } catch (err) {
+          logPhishing(
+            args.accountLabel,
+            `Failed to flag UID ${uid} individually: ${(err as Error)?.message ?? String(err)}`,
+          );
+        }
+      }
+    }
+  } catch (err) {
+    logPhishing(
+      args.accountLabel,
+      `Failed to flag messages (context=${args.context}): ${(err as Error)?.message ?? String(err)}`,
+    );
+  }
 }
 
 export function startImapWatcher(
@@ -96,7 +139,6 @@ export function startImapWatcher(
   let lastSeenUid: number | null = null;
   const scanOnStart = opts?.scanOnStart ?? false;
   const scanOnStartMax = Math.max(0, Math.min(10, opts?.scanOnStartMax ?? 10));
-  let keepAliveTimer: NodeJS.Timeout | null = null;
   let runPromise: Promise<void> | null = null;
 
   let readyResolve: (() => void) | null = null;
@@ -106,6 +148,48 @@ export function startImapWatcher(
 
   let processingChain = Promise.resolve();
   let pendingCatchUp = false;
+
+  const fetchMessageDataByUid = async (activeClient: ImapFlow, uid: number) => {
+    const lock = await activeClient.getMailboxLock(account.folder);
+    try {
+      const msg = await activeClient.fetchOne(String(uid), { uid: true, envelope: true, source: true }, { uid: true });
+      if (!msg || !msg.source) return null;
+
+      const parsed = await simpleParser(msg.source);
+
+      const parsedFromObj = Array.isArray(parsed.from) ? parsed.from[0] : parsed.from;
+      const parsedFrom = parsedFromObj?.value?.[0];
+
+      const from =
+        parsedFrom?.address ??
+        formatAddress(msg.envelope?.from?.[0]?.name, msg.envelope?.from?.[0]?.address);
+
+      const parsedToObj = Array.isArray(parsed.to) ? parsed.to[0] : parsed.to;
+      const to =
+        (parsedToObj?.value ?? [])
+          .map((v) => v.address ?? "")
+          .filter(Boolean)
+          .join(", ") || joinAddresses(msg.envelope?.to);
+
+      const subject = parsed.subject ?? msg.envelope?.subject ?? "";
+
+      const bodyText = parsed.text ?? "";
+
+      return { uid, from: from ?? "", to, subject, bodyText };
+    } finally {
+      lock.release();
+    }
+  };
+
+  const flagUids = async (activeClient: ImapFlow, uids: number[], context: string) => {
+    if (uids.length === 0) return;
+    const lock = await activeClient.getMailboxLock(account.folder);
+    try {
+      await flagPhishingMessages({ client: activeClient, uids, accountLabel: account.label, context });
+    } finally {
+      lock.release();
+    }
+  };
 
   const scheduleCatchUp = (reason: string) => {
     if (stopped) return;
@@ -123,7 +207,8 @@ export function startImapWatcher(
   };
 
   const catchUp = async (reason: string) => {
-    if (!client) return;
+    const activeClient = client;
+    if (!activeClient) return;
     if (lastSeenUid === null) {
       log(account.label, `Skip catch-up (no lastSeenUid) [reason=${reason}]`);
       return;
@@ -132,81 +217,65 @@ export function startImapWatcher(
     const fromUid = lastSeenUid + 1;
     log(account.label, `Catch-up start from UID ${fromUid} [reason=${reason}]`);
 
-    const lock = await client.getMailboxLock(account.folder);
+    // Step 1: collect new UIDs quickly (no slow AI calls while a FETCH is active)
+    const uidLock = await activeClient.getMailboxLock(account.folder);
+    let uids: number[] = [];
     try {
-      let processed = 0;
-      for await (const msg of client.fetch(
-        `${fromUid}:*`,
-        { uid: true, envelope: true, source: true },
-        { uid: true },
-      )) {
-        if (stopped) break;
-        processed += 1;
-        const uid = msg.uid;
-        if (typeof uid === "number") {
-          lastSeenUid = Math.max(lastSeenUid, uid);
-        }
+      const fetched = await activeClient.fetchAll(`${fromUid}:*`, { uid: true }, { uid: true });
+      uids = fetched.map((m) => m.uid).filter((n): n is number => typeof n === "number");
+    } finally {
+      uidLock.release();
+    }
 
-        if (!msg.source) {
-          log(account.label, `UID ${uid}: missing source, skipping`);
-          continue;
-        }
+    if (uids.length === 0) {
+      log(account.label, `Catch-up: no new messages since UID ${fromUid - 1}`);
+      return;
+    }
 
-        try {
-          const parsed = await simpleParser(msg.source);
+    uids.sort((a, b) => a - b);
+    lastSeenUid = Math.max(lastSeenUid, uids[uids.length - 1]!);
+    log(account.label, `Catch-up: found ${uids.length} new UID(s), lastSeenUid=${lastSeenUid}`);
 
-          const parsedFromObj = Array.isArray(parsed.from) ? parsed.from[0] : parsed.from;
-          const parsedFrom = parsedFromObj?.value?.[0];
-
-          const from =
-            parsedFrom?.address ??
-            formatAddress(msg.envelope?.from?.[0]?.name, msg.envelope?.from?.[0]?.address);
-
-          const parsedToObj = Array.isArray(parsed.to) ? parsed.to[0] : parsed.to;
-          const to =
-            (parsedToObj?.value ?? [])
-              .map((v) => v.address ?? "")
-              .filter(Boolean)
-              .join(", ") || joinAddresses(msg.envelope?.to);
-
-          const subject = parsed.subject ?? msg.envelope?.subject ?? "";
-
-          const body = parsed.text ?? "";
-          if (!body) {
-            log(account.label, `UID ${uid}: no text body found (html ignored)`);
-          }
-
-          log(account.label, `UID ${uid}: parsed from="${from}" subject="${subject}"`);
-
-          const result = await checkForPhishingAttempt(from ?? "", to, subject, body);
-          const treat = shouldTreatAsPhishingAttempt(result);
-
-          log(
-            account.label,
-            `UID ${uid}: check result p=${result.probability.toFixed(2)} treat=${treat}`,
-          );
-
-          if (treat) {
-            await handlePhishingEmail({
-              accountLabel: account.label,
-              from: from ?? "",
-              subject,
-              result,
-            });
-          }
-        } catch (err) {
-          log(account.label, `UID ${uid}: processing error: ${(err as Error)?.message ?? String(err)}`);
-        }
+    // Step 2: fetch+parse per UID under short locks; run AI outside lock; flag at end
+    const uidsToFlag: number[] = [];
+    for (const uid of uids) {
+      if (stopped) break;
+      log(account.label, `Catch-up UID ${uid}: fetching+parsing`);
+      const data = await fetchMessageDataByUid(activeClient, uid);
+      if (!data) {
+        log(account.label, `Catch-up UID ${uid}: missing source, skipping`);
+        continue;
       }
 
-      log(account.label, `Catch-up done, processed=${processed}, lastSeenUid=${lastSeenUid}`);
-    } finally {
-      lock.release();
+      log(account.label, `Catch-up UID ${uid}: parsed from="${data.from}" subject="${data.subject}"`);
+      const result = await checkForPhishingAttempt(data.from, data.to, data.subject, data.bodyText);
+      const treat = shouldTreatAsPhishingAttempt(result);
+      log(account.label, `Catch-up UID ${uid}: check result p=${result.probability.toFixed(2)} treat=${treat}`);
+
+      if (treat) {
+        uidsToFlag.push(uid);
+        log(account.label, `Catch-up UID ${uid}: collected as phishing (pending flagging)`);
+        await handlePhishingEmail({
+          uid,
+          accountLabel: account.label,
+          from: data.from,
+          subject: data.subject,
+          result,
+        });
+      }
     }
+
+    if (!stopped) {
+      log(account.label, `Catch-up: collected ${uidsToFlag.length} phishing message(s) to flag`);
+      await flagUids(activeClient, uidsToFlag, "catch-up");
+    }
+
+    log(account.label, `Catch-up done, processed=${uids.length}, flagged=${uidsToFlag.length}, lastSeenUid=${lastSeenUid}`);
   };
 
   const scanLatestOnStart = async (opened: { exists: number; uidNext?: number }) => {
-    if (!client) return;
+    const activeClient = client;
+    if (!activeClient) return;
     if (!scanOnStart) return;
 
     const max = scanOnStartMax;
@@ -222,83 +291,56 @@ export function startImapWatcher(
     }
 
     const startSeq = Math.max(1, exists - max + 1);
-    const range = `${startSeq}:*`;
+    const range = `${startSeq}:${exists}`;
 
-    log(account.label, `Start-scan: fetching up to ${max} newest message(s) (seq ${range})`);
+    log(account.label, `Start-scan: collecting up to ${max} newest UID(s) (seq ${range})`);
 
-    const lock = await client.getMailboxLock(account.folder);
+    const uidLock = await activeClient.getMailboxLock(account.folder);
+    let uids: number[] = [];
     try {
-      let processed = 0;
-      for await (const msg of client.fetch(range, { uid: true, envelope: true, source: true })) {
-        if (stopped) break;
-        processed += 1;
-        const uid = msg.uid;
-        if (typeof uid === "number") {
-          lastSeenUid = lastSeenUid === null ? uid : Math.max(lastSeenUid, uid);
-        }
+      const fetched = await activeClient.fetchAll(range, { uid: true });
+      uids = fetched.map((m) => m.uid).filter((n): n is number => typeof n === "number");
+    } finally {
+      uidLock.release();
+    }
 
-        if (!msg.source) {
-          log(account.label, `Start-scan UID ${uid}: missing source, skipping`);
-          if (processed >= max) break;
-          continue;
-        }
+    uids = uids.slice(-max).sort((a, b) => a - b);
+    log(account.label, `Start-scan: collected ${uids.length} UID(s)`);
 
-        try {
-          const parsed = await simpleParser(msg.source);
-
-          const parsedFromObj = Array.isArray(parsed.from) ? parsed.from[0] : parsed.from;
-          const parsedFrom = parsedFromObj?.value?.[0];
-
-          const from =
-            parsedFrom?.address ??
-            formatAddress(msg.envelope?.from?.[0]?.name, msg.envelope?.from?.[0]?.address);
-
-          const parsedToObj = Array.isArray(parsed.to) ? parsed.to[0] : parsed.to;
-          const to =
-            (parsedToObj?.value ?? [])
-              .map((v) => v.address ?? "")
-              .filter(Boolean)
-              .join(", ") || joinAddresses(msg.envelope?.to);
-
-          const subject = parsed.subject ?? msg.envelope?.subject ?? "";
-
-          const body = parsed.text ?? "";
-          if (!body) {
-            log(account.label, `Start-scan UID ${uid}: no text body found (html ignored)`);
-          }
-
-          log(account.label, `Start-scan UID ${uid}: parsed from="${from}" subject="${subject}"`);
-
-          const result = await checkForPhishingAttempt(from ?? "", to, subject, body);
-          const treat = shouldTreatAsPhishingAttempt(result);
-
-          log(
-            account.label,
-            `Start-scan UID ${uid}: check result p=${result.probability.toFixed(2)} treat=${treat}`,
-          );
-
-          if (treat) {
-            await handlePhishingEmail({
-              accountLabel: account.label,
-              from: from ?? "",
-              subject,
-              result,
-            });
-          }
-        } catch (err) {
-          log(
-            account.label,
-            `Start-scan UID ${uid}: processing error: ${(err as Error)?.message ?? String(err)}`,
-          );
-        }
-
-        if (processed >= max) break;
+    const uidsToFlag: number[] = [];
+    for (const uid of uids) {
+      if (stopped) break;
+      log(account.label, `Start-scan UID ${uid}: fetching+parsing`);
+      const data = await fetchMessageDataByUid(activeClient, uid);
+      if (!data) {
+        log(account.label, `Start-scan UID ${uid}: missing source, skipping`);
+        continue;
       }
 
-      log(account.label, `Start-scan done, processed=${processed}`);
-    } finally {
-      lock.release();
+      log(account.label, `Start-scan UID ${uid}: parsed from="${data.from}" subject="${data.subject}"`);
+      const result = await checkForPhishingAttempt(data.from, data.to, data.subject, data.bodyText);
+      const treat = shouldTreatAsPhishingAttempt(result);
+      log(account.label, `Start-scan UID ${uid}: check result p=${result.probability.toFixed(2)} treat=${treat}`);
+
+      if (treat) {
+        uidsToFlag.push(uid);
+        log(account.label, `Start-scan UID ${uid}: collected as phishing (pending flagging)`);
+        await handlePhishingEmail({
+          uid,
+          accountLabel: account.label,
+          from: data.from,
+          subject: data.subject,
+          result,
+        });
+      }
     }
+
+    if (!stopped) {
+      log(account.label, `Start-scan: collected ${uidsToFlag.length} phishing message(s) to flag`);
+      await flagUids(activeClient, uidsToFlag, "start-scan");
+    }
+
+    log(account.label, `Start-scan done, processed=${uids.length}, flagged=${uidsToFlag.length}`);
   };
 
   const run = async () => {
@@ -309,14 +351,31 @@ export function startImapWatcher(
       const backoffMs = Math.min(30_000, 1_000 * Math.pow(2, attempt - 1));
 
       try {
+        const onError = (err: unknown) => {
+          log(account.label, `Client error: ${(err as Error)?.message ?? String(err)}`);
+        };
+
+        const onExists = (data: { path: string; count: number; prevCount: number }) => {
+          if (data.path !== account.folder) return;
+          log(account.label, `EXISTS: count ${data.prevCount} -> ${data.count}`);
+          scheduleCatchUp("exists");
+        };
+
         const nextClient = new ImapFlow({
           host: account.host,
           port: account.port,
           secure: account.secure,
           auth: { user: account.user, pass: account.password },
           logger: false,
+          // Default socketTimeout is 5min. This app can be "busy" (AI calls) for longer while holding a mailbox lock.
+          socketTimeout: 15 * 60 * 1000,
+          // Refresh IDLE periodically to keep connections stable in long-running sessions.
+          maxIdleTime: 4 * 60 * 1000,
         });
         client = nextClient;
+        // Attach immediately so 'error' does not crash the process (EventEmitter default behavior).
+        nextClient.on("error", onError);
+        nextClient.on("exists", onExists);
 
         log(account.label, `Connecting to ${account.host}:${account.port} (attempt ${attempt})`);
         await nextClient.connect();
@@ -364,29 +423,6 @@ export function startImapWatcher(
           readyResolve = null;
         }
 
-        keepAliveTimer = setInterval(() => {
-          if (!client || stopped) return;
-          client
-            .noop()
-            .then(() => log(account.label, "NOOP keepalive ok"))
-            .catch((err) =>
-              log(account.label, `NOOP keepalive failed: ${(err as Error)?.message ?? String(err)}`),
-            );
-        }, 10 * 60 * 1000);
-
-        const onExists = (data: { path: string; count: number; prevCount: number }) => {
-          if (data.path !== account.folder) return;
-          log(account.label, `EXISTS: count ${data.prevCount} -> ${data.count}`);
-          scheduleCatchUp("exists");
-        };
-
-        const onError = (err: unknown) => {
-          log(account.label, `Client error: ${(err as Error)?.message ?? String(err)}`);
-        };
-
-        nextClient.on("exists", onExists);
-        nextClient.on("error", onError);
-
         const closed = new Promise<void>((resolve) => {
           const done = () => resolve();
           nextClient.once("close", done);
@@ -396,10 +432,6 @@ export function startImapWatcher(
         attempt = 0; // reset backoff after successful connect
         await closed;
 
-        if (keepAliveTimer) {
-          clearInterval(keepAliveTimer);
-          keepAliveTimer = null;
-        }
         nextClient.off("exists", onExists);
         nextClient.off("error", onError);
 
@@ -431,10 +463,6 @@ export function startImapWatcher(
     ready,
     async stop() {
       stopped = true;
-      if (keepAliveTimer) {
-        clearInterval(keepAliveTimer);
-        keepAliveTimer = null;
-      }
       // Force-close the socket to immediately break out of IDLE/FETCH.
       if (client) {
         try {

@@ -2,11 +2,6 @@ import "dotenv/config";
 import { z } from "zod";
 import { buildImapAccountConfigFromEnvShape, startImapWatcher } from "./imap.js";
 
-const ANSI = {
-  green: "\u001b[32m",
-  reset: "\u001b[0m",
-} as const;
-
 const envAccountsSchema = z.array(
   z.object({
     label: z.string().min(1),
@@ -53,18 +48,28 @@ function envInt(name: string, defaultValue: number): number {
 
 async function main() {
   // eslint-disable-next-line no-console
-  console.log(`${ANSI.green}[main] starting at ${new Date().toISOString()}${ANSI.reset}`);
+  console.log(`[main] starting at ${new Date().toISOString()}`);
+
+  process.on("unhandledRejection", (reason) => {
+    // eslint-disable-next-line no-console
+    console.error("[main] unhandledRejection", reason);
+  });
+
+  process.on("uncaughtException", (err) => {
+    // eslint-disable-next-line no-console
+    console.error("[main] uncaughtException", err);
+  });
 
   const accounts = loadAccountsFromEnv();
   // eslint-disable-next-line no-console
   console.log(
-    `${ANSI.green}[main] loaded ${accounts.length} IMAP account(s): ${accounts.map((a) => a.label).join(", ")}${ANSI.reset}`,
+    `[main] loaded ${accounts.length} IMAP account(s): ${accounts.map((a) => a.label).join(", ")}`,
   );
 
   const scanOnStart = envFlag("IMAP_SCAN_ON_START", false);
   const scanMax = Math.min(10, envInt("IMAP_SCAN_ON_START_MAX", 10));
   // eslint-disable-next-line no-console
-  console.log(`${ANSI.green}[main] IMAP_SCAN_ON_START=${scanOnStart} IMAP_SCAN_ON_START_MAX=${scanMax}${ANSI.reset}`);
+  console.log(`[main] IMAP_SCAN_ON_START=${scanOnStart} IMAP_SCAN_ON_START_MAX=${scanMax}`);
 
   const watchers = accounts.map((account) =>
     startImapWatcher(account, { scanOnStart, scanOnStartMax: scanMax }),
@@ -72,7 +77,7 @@ async function main() {
   await Promise.all(watchers.map((w) => w.ready));
 
   // eslint-disable-next-line no-console
-  console.log(`${ANSI.green}[main] all watchers connected at least once${ANSI.reset}`);
+  console.log("[main] all watchers connected at least once");
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
@@ -83,16 +88,16 @@ async function main() {
     }
     shuttingDown = true;
     // eslint-disable-next-line no-console
-    console.log(`${ANSI.green}[main] shutdown requested (${signal})${ANSI.reset}`);
+    console.log(`[main] shutdown requested (${signal})`);
     const forceTimer = setTimeout(() => {
       // eslint-disable-next-line no-console
-      console.log(`${ANSI.green}[main] shutdown timed out, forcing exit${ANSI.reset}`);
+      console.log("[main] shutdown timed out, forcing exit");
       process.exit(1);
     }, 10_000);
     await Promise.allSettled(watchers.map((w) => w.stop()));
     clearTimeout(forceTimer);
     // eslint-disable-next-line no-console
-    console.log(`${ANSI.green}[main] shutdown complete${ANSI.reset}`);
+    console.log("[main] shutdown complete");
     process.exit(0);
   };
 
@@ -102,6 +107,6 @@ async function main() {
 
 void main().catch((err) => {
   // eslint-disable-next-line no-console
-  console.error(`${ANSI.green}[main] fatal error${ANSI.reset}`, err);
+  console.error("[main] fatal error", err);
   process.exit(1);
 });
