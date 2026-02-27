@@ -1,0 +1,1 @@
+Für N bei der Prüfung der Einträge sollen diese Optionen stehen: 3, 5, 10, 25, 50, 100.
