@@ -14,7 +14,7 @@ type ContinuousPolicy =
   | { kind: "poll"; intervalSeconds: 30 | 60 | 120 | 300 }
   | { kind: "idle" };
 
-type AccountStatus = "idle" | "scanning" | "watching" | "error";
+type AccountStatus = "idle" | "scanning" | "watching" | "paused" | "error";
 type AccountStatusEvent = AccountStatus;
 
 type AccountRecord = {
@@ -65,6 +65,8 @@ function statusLabel(status: AccountStatus) {
       return "Scanning";
     case "watching":
       return "Watching";
+    case "paused":
+      return "Paused";
     case "error":
       return "Error";
   }
@@ -132,6 +134,7 @@ function AppInner() {
   const [tab, setTab] = useState<"accounts" | "log">("accounts");
   const [accounts, setAccounts] = useState<Account[]>([]);
   const accountsRef = useRef<Account[]>([]);
+  const didInitialLoadRef = useRef(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>(() => [
     { id: randomId("log"), at: new Date(), level: "info", message: "App started." },
   ]);
@@ -213,7 +216,8 @@ function AppInner() {
       for (const a of loaded) {
         if (a.mode === "continuous") {
           // eslint-disable-next-line no-await-in-loop
-          await invoke("start_watch", { accountId: a.id });
+          const status = (await invoke("start_watch", { accountId: a.id })) as AccountStatus;
+          setAccounts((prev) => prev.map((x) => (x.id === a.id ? { ...x, status } : x)));
         }
       }
     } catch (err) {
@@ -222,6 +226,10 @@ function AppInner() {
   };
 
   useEffect(() => {
+    // In dev, React StrictMode intentionally runs effects twice.
+    // Avoid duplicating initial load + logs.
+    if (didInitialLoadRef.current) return;
+    didInitialLoadRef.current = true;
     void loadAccounts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -276,6 +284,10 @@ function AppInner() {
       } else if (status === "watching") {
         setAccounts((prev) =>
           prev.map((a) => (a.id === event.payload.accountId ? { ...a, status: "watching" } : a)),
+        );
+      } else if (status === "paused") {
+        setAccounts((prev) =>
+          prev.map((a) => (a.id === event.payload.accountId ? { ...a, status: "paused" } : a)),
         );
       } else if (status === "idle") {
         setAccounts((prev) =>
@@ -354,9 +366,11 @@ function AppInner() {
 
       // Start/stop automatic mode based on persisted mode.
       if (record.mode === "continuous") {
-        await invoke("start_watch", { accountId: record.id });
+        const status = (await invoke("start_watch", { accountId: record.id })) as AccountStatus;
+        setAccounts((prev) => prev.map((x) => (x.id === record.id ? { ...x, status } : x)));
       } else {
-        await invoke("stop_watch", { accountId: record.id });
+        const status = (await invoke("stop_watch", { accountId: record.id })) as AccountStatus;
+        setAccounts((prev) => prev.map((x) => (x.id === record.id ? { ...x, status } : x)));
       }
 
       pushLog({
@@ -484,7 +498,7 @@ function AppInner() {
       <header className="topbar">
         <div className="brand">
           <div className="brand__title">IMAP Phishing Filter</div>
-          <div className="brand__subtitle">MVP (accounts + on-demand scan)</div>
+          <div className="brand__subtitle">Desktop tool (accounts + scans)</div>
         </div>
 
         <nav className="tabs" aria-label="Tabs">

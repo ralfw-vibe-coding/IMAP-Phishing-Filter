@@ -17,6 +17,63 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 const KEYCHAIN_SERVICE: &str = "imap-phishing-filter";
 
+fn macos_clamshell_state() -> Option<bool> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+
+    let ioreg = if Path::new("/usr/sbin/ioreg").exists() {
+        "/usr/sbin/ioreg"
+    } else {
+        "ioreg"
+    };
+
+    fn parse(text: &str) -> Option<bool> {
+        for line in text.lines() {
+            let lower = line.to_lowercase();
+            if !lower.contains("appleclamshellstate") {
+                continue;
+            }
+            let (_, rhs) = line.split_once('=')?;
+            let v = rhs.trim().trim_matches('"').trim_matches('\'').to_lowercase();
+
+            if v.starts_with("yes") || v.starts_with("true") || v.starts_with('1') {
+                return Some(true);
+            }
+            if v.starts_with("no") || v.starts_with("false") || v.starts_with('0') {
+                return Some(false);
+            }
+        }
+        None
+    }
+
+    // Preferred: query root power domain (often the canonical location for this key).
+    if let Ok(output) = Command::new(ioreg)
+        .args(["-r", "-n", "IOPMrootDomain", "-d", "4"])
+        .output()
+    {
+        if output.status.success() {
+            if let Some(v) = parse(&String::from_utf8_lossy(&output.stdout)) {
+                return Some(v);
+            }
+        }
+    }
+
+    // Fallback: query by key (may work on some systems).
+    if let Ok(output) = Command::new(ioreg)
+        .args(["-r", "-k", "AppleClamshellState", "-d", "4"])
+        .output()
+    {
+        if output.status.success() {
+            if let Some(v) = parse(&String::from_utf8_lossy(&output.stdout)) {
+                return Some(v);
+            }
+        }
+    }
+
+    None
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 enum OnDemandPolicy {
@@ -88,6 +145,135 @@ struct WatchManager {
 
 struct ScanManager {
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+fn emit_log(app: &AppHandle, account_id: &str, line: &str, stream: &str) {
+    let _ = app.emit(
+        "scan_log",
+        ScanLogEvent {
+            accountId: account_id.to_string(),
+            line: line.to_string(),
+            stream: stream.to_string(),
+        },
+    );
+}
+
+fn emit_status(app: &AppHandle, account_id: &str, status: &str) {
+    let _ = app.emit(
+        "scan_status",
+        ScanStatusEvent {
+            accountId: account_id.to_string(),
+            status: status.to_string(),
+        },
+    );
+}
+
+fn start_watch_inner(app: AppHandle, state: &WatchManager, account_id: String) -> Result<bool, String> {
+    let mut map = state
+        .watchers
+        .lock()
+        .map_err(|_| "watch lock poisoned".to_string())?;
+    if map.contains_key(&account_id) {
+        return Ok(false);
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop2 = stop.clone();
+    let app2 = app.clone();
+    let id2 = account_id.clone();
+
+    let handle = tauri::async_runtime::spawn_blocking(move || {
+        emit_status(&app2, &id2, "watching");
+
+        loop {
+            if stop2.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Run incremental scan (since lastSeenUid). Limit per tick to keep it safe/cost-bounded.
+            let _ = run_scan_process(
+                app2.clone(),
+                id2.clone(),
+                "since".to_string(),
+                None,
+                Some(25),
+                Some("watching".to_string()),
+                Some(stop2.clone()),
+            );
+
+            // Sleep (coarse). If macOS clamshell closes, the global monitor will abort this watcher.
+            let mut slept = 0u64;
+            while slept < 60 && !stop2.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_secs(1));
+                slept += 1;
+            }
+        }
+
+        emit_status(&app2, &id2, "idle");
+    });
+
+    map.insert(
+        account_id,
+        WatchEntry {
+            stop,
+            handle,
+        },
+    );
+    Ok(true)
+}
+
+fn stop_watch_inner(
+    app: &AppHandle,
+    state: &WatchManager,
+    account_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    let mut map = state
+        .watchers
+        .lock()
+        .map_err(|_| "watch lock poisoned".to_string())?;
+    if let Some(entry) = map.remove(account_id) {
+        entry.stop.store(true, Ordering::Relaxed);
+        entry.handle.abort();
+        emit_status(app, account_id, status);
+    }
+    Ok(())
+}
+
+fn stop_all_watches(app: &AppHandle, state: &WatchManager, status: &str) -> Vec<String> {
+    let mut stopped: Vec<String> = vec![];
+    let mut map = match state.watchers.lock() {
+        Ok(m) => m,
+        Err(_) => return stopped,
+    };
+
+    for (account_id, entry) in map.drain() {
+        entry.stop.store(true, Ordering::Relaxed);
+        entry.handle.abort();
+        emit_status(app, &account_id, status);
+        stopped.push(account_id);
+    }
+
+    stopped
+}
+
+fn cancel_all_scans(app: &AppHandle, scans: &ScanManager) -> usize {
+    let mut cancelled = 0usize;
+    let map = match scans.cancels.lock() {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    for (account_id, token) in map.iter() {
+        token.store(true, Ordering::Relaxed);
+        emit_log(app, account_id, "Stop requested: cancelling scan…", "stdout");
+        cancelled += 1;
+    }
+    cancelled
+}
+
+fn macos_is_clamshell_closed() -> bool {
+    // Battery-safe default: if we cannot determine the state, assume closed.
+    macos_clamshell_state().unwrap_or(true)
 }
 
 fn repo_root() -> PathBuf {
@@ -321,83 +507,36 @@ fn start_on_demand_scan(app: AppHandle, accountId: String) -> Result<(), String>
 }
 
 #[tauri::command]
-fn start_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> Result<(), String> {
-    let mut map = state.watchers.lock().map_err(|_| "watch lock poisoned".to_string())?;
-    if map.contains_key(&accountId) {
-        return Ok(());
+fn start_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> Result<String, String> {
+    if cfg!(target_os = "macos") && macos_is_clamshell_closed() {
+        emit_status(&app, &accountId, "paused");
+        let state = macos_clamshell_state();
+        let why = match state {
+            Some(true) => "clamshell=closed",
+            None => "clamshell=unknown (defaulting closed)",
+            Some(false) => "clamshell=open (unexpected)",
+        };
+        emit_log(
+            &app,
+            &accountId,
+            &format!("Continuous mode requested while clamshell is closed/unknown; not starting watcher (paused). ({why})"),
+            "stdout",
+        );
+        return Ok("paused".to_string());
     }
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let app2 = app.clone();
-    let id2 = accountId.clone();
-
-    let handle = tauri::async_runtime::spawn_blocking(move || {
-        let _ = app2.emit(
-            "scan_status",
-            ScanStatusEvent {
-                accountId: id2.clone(),
-                status: "watching".to_string(),
-            },
-        );
-
-        loop {
-            if stop2.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Run incremental scan (since lastSeenUid). Limit per tick to keep it safe/cost-bounded.
-            let _ = run_scan_process(
-                app2.clone(),
-                id2.clone(),
-                "since".to_string(),
-                None,
-                Some(25),
-                Some("watching".to_string()),
-                Some(stop2.clone()),
-            );
-
-            let mut slept = 0u64;
-            while slept < 60 && !stop2.load(Ordering::Relaxed) {
-                thread::sleep(Duration::from_secs(1));
-                slept += 1;
-            }
-        }
-
-        let _ = app2.emit(
-            "scan_status",
-            ScanStatusEvent {
-                accountId: id2.clone(),
-                status: "idle".to_string(),
-            },
-        );
-    });
-
-    map.insert(
-        accountId,
-        WatchEntry {
-            stop,
-            handle,
-        },
-    );
-    Ok(())
+    let started = start_watch_inner(app.clone(), &state, accountId.clone())?;
+    if started {
+        Ok("watching".to_string())
+    } else {
+        // already running
+        Ok("watching".to_string())
+    }
 }
 
 #[tauri::command]
-fn stop_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> Result<(), String> {
-    let mut map = state.watchers.lock().map_err(|_| "watch lock poisoned".to_string())?;
-    if let Some(entry) = map.remove(&accountId) {
-        entry.stop.store(true, Ordering::Relaxed);
-        entry.handle.abort();
-        let _ = app.emit(
-            "scan_status",
-            ScanStatusEvent {
-                accountId,
-                status: "idle".to_string(),
-            },
-        );
-    }
-    Ok(())
+fn stop_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> Result<String, String> {
+    stop_watch_inner(&app, &state, &accountId, "idle")?;
+    Ok("idle".to_string())
 }
 
 #[tauri::command]
@@ -603,13 +742,11 @@ fn run_scan_process(
                 if let Some(token) = &cancel {
                     if token.load(Ordering::Relaxed) && !cancelled {
                         cancelled = true;
-                        let _ = app.emit(
-                            "scan_log",
-                            ScanLogEvent {
-                                accountId: account_id.clone(),
-                                line: "Cancelling scan (killing node process)…".to_string(),
-                                stream: "stderr".to_string(),
-                            },
+                        emit_log(
+                            &app,
+                            &account_id,
+                            "Cancelling scan (killing node process)…",
+                            "stdout",
                         );
                         let _ = child.kill();
                     }
@@ -627,14 +764,21 @@ fn run_scan_process(
 
     if let Ok(s) = status {
         if !s.success() {
-            let _ = app.emit(
-                "scan_log",
-                ScanLogEvent {
-                    accountId: account_id.clone(),
-                    line: format!("Scan process exited with status {s}"),
-                    stream: "stderr".to_string(),
-                },
-            );
+            if cancelled {
+                emit_log(
+                    &app,
+                    &account_id,
+                    &format!("Scan cancelled (process exited with status {s})"),
+                    "stdout",
+                );
+            } else {
+                emit_log(
+                    &app,
+                    &account_id,
+                    &format!("Scan process exited with status {s}"),
+                    "stderr",
+                );
+            }
         }
     }
 
@@ -642,7 +786,7 @@ fn run_scan_process(
     if let Ok(guard) = scan_result.lock() {
         if let Some(res) = guard.clone() {
             let _ = update_last_seen_uid(&app, &account_id, res.lastSeenUid);
-        } else {
+        } else if !cancelled {
             let _ = app.emit(
                 "scan_log",
                 ScanLogEvent {
@@ -654,13 +798,17 @@ fn run_scan_process(
         }
     }
 
-    let _ = app.emit(
-        "scan_status",
-        ScanStatusEvent {
-            accountId: account_id.clone(),
-            status: status_after.unwrap_or_else(|| "idle".to_string()),
-        },
-    );
+    // Avoid overwriting Pause state when we cancelled a continuous watch scan.
+    let should_emit_status = !(cancelled && status_after.as_deref() == Some("watching"));
+    if should_emit_status {
+        let _ = app.emit(
+            "scan_status",
+            ScanStatusEvent {
+                accountId: account_id.clone(),
+                status: status_after.unwrap_or_else(|| "idle".to_string()),
+            },
+        );
+    }
 
     Ok(())
 }
@@ -673,6 +821,102 @@ pub fn run() {
         })
         .manage(ScanManager {
             cancels: Mutex::new(HashMap::new()),
+        })
+        .setup(|app| {
+            if cfg!(target_os = "macos") {
+                let handle = app.handle().clone();
+
+                tauri::async_runtime::spawn_blocking(move || {
+                    // Default state: assume open (avoid stopping work on transient errors)
+                    let mut last_closed = false;
+                    let mut warned_unknown = false;
+
+                    // Emit initial state once
+                    let initial = macos_clamshell_state();
+                    match initial {
+                        Some(true) => emit_log(&handle, "app", "macOS clamshell state at startup: closed (continuous checks will be paused).", "stdout"),
+                        Some(false) => emit_log(&handle, "app", "macOS clamshell state at startup: open.", "stdout"),
+                        None => emit_log(&handle, "app", "macOS clamshell state at startup: unknown (defaulting to closed to avoid battery drain).", "stderr"),
+                    }
+
+                    loop {
+                        let state = macos_clamshell_state();
+                        if state.is_none() && !warned_unknown {
+                            warned_unknown = true;
+                            emit_log(
+                                &handle,
+                                "app",
+                                "Warning: unable to read macOS clamshell state; defaulting to 'closed' to avoid battery drain.",
+                                "stderr",
+                            );
+                        }
+                        let closed = state.unwrap_or(true);
+
+                        if closed && !last_closed {
+                            last_closed = true;
+
+                            let watches = handle.state::<WatchManager>();
+                            let scans = handle.state::<ScanManager>();
+                            let stopped = stop_all_watches(&handle, watches.inner(), "paused");
+                            let cancelled = cancel_all_scans(&handle, scans.inner());
+
+                            for id in &stopped {
+                                emit_log(
+                                    &handle,
+                                    id,
+                                    "macOS clamshell closed: stopped continuous watcher to save battery.",
+                                    "stdout",
+                                );
+                            }
+
+                            if cancelled > 0 {
+                                emit_log(
+                                    &handle,
+                                    "app",
+                                    &format!("macOS clamshell closed: cancelling {cancelled} running scan(s)."),
+                                    "stdout",
+                                );
+                            }
+                        } else if !closed && last_closed {
+                            last_closed = false;
+
+                            // Restart all continuous watchers based on persisted settings.
+                            let file = match accounts_file(&handle) {
+                                Ok(f) => f,
+                                Err(_) => {
+                                    thread::sleep(Duration::from_secs(10));
+                                    continue;
+                                }
+                            };
+                            let records = match load_records(&file) {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    thread::sleep(Duration::from_secs(10));
+                                    continue;
+                                }
+                            };
+
+                            let watches = handle.state::<WatchManager>();
+                            for r in records {
+                                if matches!(r.mode, AccountMode::Continuous) {
+                                    let _ = start_watch_inner(handle.clone(), watches.inner(), r.id.clone());
+                                    emit_log(
+                                        &handle,
+                                        &r.id,
+                                        "macOS clamshell opened: restarted continuous watcher.",
+                                        "stdout",
+                                    );
+                                }
+                            }
+                        }
+
+                        // Keep this low-frequency to reduce battery drain while still reacting.
+                        let sleep_s = if last_closed { 30 } else { 10 };
+                        thread::sleep(Duration::from_secs(sleep_s));
+                    }
+                });
+            }
+            Ok(())
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

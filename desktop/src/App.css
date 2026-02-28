@@ -209,6 +209,12 @@ body {
   background: rgba(46, 229, 157, 0.08);
 }
 
+.badge--paused {
+  border-color: rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .badge--scanning {
   border-color: rgba(255, 209, 102, 0.35);
   color: rgba(255, 209, 102, 0.95);

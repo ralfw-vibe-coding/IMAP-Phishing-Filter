@@ -61,15 +61,7 @@ async function main() {
   const opened = await client.mailboxOpen(config.folder);
   log(config.label, `Mailbox opened path="${config.folder}" exists=${opened.exists} uidNext=${opened.uidNext}`);
 
-  const exists = opened.exists ?? 0;
   const baselineUid = Math.max(0, (opened.uidNext ?? 1) - 1);
-
-  if (exists <= 0) {
-    log(config.label, "Mailbox is empty; nothing to scan");
-    scanResultLine({ lastSeenUid: baselineUid, processed: 0, flagged: 0 });
-    await client.logout().catch(() => client.close());
-    return;
-  }
 
   if (scanKind === "since") {
     if (sinceUid === null || !Number.isFinite(sinceUid)) {
@@ -184,21 +176,32 @@ async function main() {
   }
 
   // Default: latest-N scan (on-demand)
-  const startSeq = Math.max(1, exists - latestN + 1);
-  const range = `${startSeq}:${exists}`;
-  log(config.label, `On-demand scan: collecting newest ${Math.min(latestN, exists)} message(s) (seq ${range})`);
+  const startUid = Math.max(1, baselineUid - latestN + 1);
+  const range = `${startUid}:*`;
+  log(config.label, `On-demand scan: collecting newest ~${latestN} message(s) (uid ${range}, uidNext=${opened.uidNext})`);
 
   const uidLock = await client.getMailboxLock(config.folder);
   let uids: number[] = [];
   try {
-    const fetched = await client.fetchAll(range, { uid: true });
+    const fetched = await client.fetchAll(range, { uid: true }, { uid: true });
     uids = fetched.map((m) => m.uid).filter((n): n is number => typeof n === "number");
   } finally {
     uidLock.release();
   }
 
   uids.sort((a, b) => a - b);
+  if (uids.length > latestN) {
+    uids = uids.slice(-latestN);
+  }
   log(config.label, `On-demand scan: collected ${uids.length} UID(s)`);
+
+  if (uids.length === 0) {
+    log(config.label, "On-demand scan: no messages found; nothing to scan");
+    scanResultLine({ lastSeenUid: baselineUid, processed: 0, flagged: 0 });
+    await client.logout().catch(() => client.close());
+    log(config.label, "Done");
+    return;
+  }
 
   const phishingUids: number[] = [];
 
