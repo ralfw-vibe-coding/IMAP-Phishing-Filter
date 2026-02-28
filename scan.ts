@@ -38,6 +38,7 @@ async function main() {
   const sinceUid = sinceUidRaw ? Number.parseInt(sinceUidRaw, 10) : null;
   const maxMessagesRaw = process.env.SCAN_MAX_MESSAGES?.trim();
   const maxMessages = maxMessagesRaw ? Math.max(1, Number.parseInt(maxMessagesRaw, 10) || 1) : null;
+  const phishingAction = (process.env.SCAN_PHISHING_ACTION ?? "flag").toLowerCase(); // "flag" | "move"
 
   const account = JSON.parse(raw) as EnvAccountShape;
   const config = buildImapAccountConfigFromEnvShape(account);
@@ -62,6 +63,47 @@ async function main() {
   log(config.label, `Mailbox opened path="${config.folder}" exists=${opened.exists} uidNext=${opened.uidNext}`);
 
   const baselineUid = Math.max(0, (opened.uidNext ?? 1) - 1);
+
+  const ensurePhishingMailbox = async () => {
+    try {
+      await client.mailboxCreate("Phishing");
+      log(config.label, 'Created mailbox folder "Phishing"');
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err);
+      // If it already exists, ignore. Otherwise still proceed (MOVE will fail with a clearer error).
+      if (/exists|already/i.test(msg)) {
+        return;
+      }
+      log(config.label, `Warning: failed to create mailbox "Phishing": ${msg}`);
+    }
+  };
+
+  const treatPhishing = async (uids: number[], context: string) => {
+    if (uids.length === 0) return;
+
+    if (phishingAction === "move") {
+      log(config.label, `Collected ${uids.length} phishing message(s) to move (context=${context})`);
+      await ensurePhishingMailbox();
+      const lock = await client.getMailboxLock(config.folder);
+      try {
+        const res = await client.messageMove(uids, "Phishing", { uid: true });
+        const moved = typeof res === "object" && res && "uidMap" in (res as any) ? (res as any).uidMap?.size : null;
+        log(config.label, `Moved ${uids.length} message(s) to "Phishing"${moved !== null ? ` (uidMap=${moved})` : ""}`);
+      } finally {
+        lock.release();
+      }
+      return;
+    }
+
+    log(config.label, `Collected ${uids.length} phishing message(s) to flag (context=${context})`);
+    const lock = await client.getMailboxLock(config.folder);
+    try {
+      const ok = await client.messageFlagsAdd(uids, ["\\Flagged"], { uid: true });
+      log(config.label, `Flagged ${uids.length} message(s) ok=${ok}`);
+    } finally {
+      lock.release();
+    }
+  };
 
   if (scanKind === "since") {
     if (sinceUid === null || !Number.isFinite(sinceUid)) {
@@ -164,14 +206,7 @@ async function main() {
     }
 
     if (phishingUids.length > 0) {
-      log(config.label, `Collected ${phishingUids.length} phishing message(s) to flag`);
-      const lock = await client.getMailboxLock(config.folder);
-      try {
-        const ok = await client.messageFlagsAdd(phishingUids, ["\\Flagged"], { uid: true });
-        log(config.label, `Flagged ${phishingUids.length} message(s) ok=${ok}`);
-      } finally {
-        lock.release();
-      }
+      await treatPhishing(phishingUids, "auto");
     } else {
       log(config.label, "No phishing detected in new messages");
     }
@@ -262,14 +297,7 @@ async function main() {
   }
 
   if (phishingUids.length > 0) {
-    log(config.label, `Collected ${phishingUids.length} phishing message(s) to flag`);
-    const lock = await client.getMailboxLock(config.folder);
-    try {
-      const ok = await client.messageFlagsAdd(phishingUids, ["\\Flagged"], { uid: true });
-      log(config.label, `Flagged ${phishingUids.length} message(s) ok=${ok}`);
-    } finally {
-      lock.release();
-    }
+    await treatPhishing(phishingUids, "on-demand");
   } else {
     log(config.label, "No phishing detected in selected messages");
   }

@@ -100,6 +100,17 @@ enum ContinuousPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+enum PhishingTreatment {
+    Flag,
+    MoveToPhishingFolder,
+}
+
+fn default_phishing_treatment() -> PhishingTreatment {
+    PhishingTreatment::Flag
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum AccountMode {
     OnDemand,
     Continuous,
@@ -115,6 +126,8 @@ struct AccountRecord {
     mode: AccountMode,
     onDemand: OnDemandPolicy,
     continuous: ContinuousPolicy,
+    #[serde(default = "default_phishing_treatment")]
+    phishingTreatment: PhishingTreatment,
     lastSeenUid: Option<u32>,
 }
 
@@ -849,6 +862,13 @@ fn run_scan_process(
                 "folder": account.folder
             })
             .to_string(),
+        )
+        .env(
+            "SCAN_PHISHING_ACTION",
+            match account.phishingTreatment {
+                PhishingTreatment::Flag => "flag",
+                PhishingTreatment::MoveToPhishingFolder => "move",
+            },
         )
         .env("SCAN_KIND", scan_kind.clone())
         .env("SCAN_LATEST_N", latest_n.to_string())

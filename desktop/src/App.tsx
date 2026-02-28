@@ -26,6 +26,7 @@ type AccountRecord = {
   mode: AccountMode;
   onDemand: OnDemandPolicy;
   continuous: ContinuousPolicy;
+  phishingTreatment: "flag" | "move_to_phishing_folder";
   lastSeenUid?: number;
 };
 
@@ -109,6 +110,15 @@ function passwordLabel(hasPassword: boolean) {
   return hasPassword ? "Stored (Keychain)" : "Missing";
 }
 
+function describeTreatment(t: AccountRecord["phishingTreatment"]) {
+  switch (t) {
+    case "flag":
+      return "Flag (\\Flagged)";
+    case "move_to_phishing_folder":
+      return 'Move to "Phishing" folder';
+  }
+}
+
 class ErrorBoundary extends Component<
   { children: React.ReactNode },
   { errorMessage: string | null }
@@ -175,6 +185,7 @@ function AppInner() {
           mode: editingAccount.mode,
           onDemand: editingAccount.onDemand,
           continuous: editingAccount.continuous,
+          phishingTreatment: editingAccount.phishingTreatment ?? "flag",
           lastSeenUid: editingAccount.lastSeenUid,
         } satisfies AccountRecord,
         hasPassword: editingAccount.hasPassword,
@@ -191,6 +202,7 @@ function AppInner() {
         mode: "on_demand",
         onDemand: { kind: "latest", n: 10 },
         continuous: { kind: "poll", intervalSeconds: 60 },
+        phishingTreatment: "flag",
         lastSeenUid: undefined,
       } satisfies AccountRecord,
       hasPassword: false,
@@ -373,6 +385,7 @@ function AppInner() {
         mode: "on_demand",
         onDemand: { kind: "latest", n: 10 },
         continuous: { kind: "poll", intervalSeconds: 60 },
+        phishingTreatment: "flag",
         lastSeenUid: undefined,
       },
       hasPassword: false,
@@ -644,6 +657,9 @@ function AppInner() {
                       <span className="pill">
                         <strong>{relevantSettingsLabel(a)}</strong>
                       </span>
+                      <span className="pill">
+                        Action: <strong>{describeTreatment(a.phishingTreatment)}</strong>
+                      </span>
                     </div>
                   </div>
 
@@ -872,6 +888,24 @@ function AppInner() {
                     </button>
                   </div>
                   <div className="hint">Continuous mode runs polling every 60s while the app is running.</div>
+                </div>
+
+                <div className="field">
+                  <label className="label">Phishing action</label>
+                  <select
+                    className="select"
+                    value={draft.record.phishingTreatment}
+                    onChange={(e) => {
+                      const value = e.currentTarget.value as AccountRecord["phishingTreatment"];
+                      setDraft((p) => ({ ...p, record: { ...p.record, phishingTreatment: value } }));
+                    }}
+                  >
+                    <option value="flag">Flag (\\Flagged)</option>
+                    <option value="move_to_phishing_folder">Move to "Phishing" folder</option>
+                  </select>
+                  <div className="hint">
+                    If needed, the app auto-creates the mailbox folder <code>Phishing</code> in the account.
+                  </div>
                 </div>
 
                 <div className="field">
