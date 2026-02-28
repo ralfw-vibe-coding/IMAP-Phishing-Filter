@@ -435,6 +435,23 @@ function AppInner() {
     }
   };
 
+  const cancelScan = async (accountId: string) => {
+    const a = accounts.find((x) => x.id === accountId);
+    if (!a) return;
+    if (a.status !== "scanning") return;
+
+    try {
+      await invoke("cancel_scan", { accountId: a.id });
+    } catch (err) {
+      pushLog({
+        level: "error",
+        accountId: a.id,
+        accountLabel: a.label,
+        message: `Failed to stop scan: ${String(err)}`,
+      });
+    }
+  };
+
   const startScanAll = async () => {
     pushLog({ level: "info", message: `Starting check for ${accounts.length} account(s)...` });
     setTab("log");
@@ -550,7 +567,7 @@ function AppInner() {
                   </div>
 
                   <div className="card__body">
-                    <div className="sectionTitle">Check settings</div>
+                    <div className="sectionTitle">Phishing filter settings</div>
                     <div className="pillRow">
                       <span className="pill">
                         Mode: <strong>{a.mode === "on_demand" ? "On demand" : "Continuous"}</strong>
@@ -570,6 +587,15 @@ function AppInner() {
                     >
                       Check now
                     </button>
+                    {a.status === "scanning" ? (
+                      <button
+                        type="button"
+                        className="btn btn--danger"
+                        onClick={() => void cancelScan(a.id)}
+                      >
+                        Stop!
+                      </button>
+                    ) : null}
                     <button type="button" className="btn btn--ghost" onClick={() => openEditAccount(a.id)}>
                       Edit
                     </button>

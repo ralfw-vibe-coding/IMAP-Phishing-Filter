@@ -86,6 +86,10 @@ struct WatchManager {
     watchers: Mutex<HashMap<String, WatchEntry>>,
 }
 
+struct ScanManager {
+    cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
 fn repo_root() -> PathBuf {
     // In dev, this points to .../desktop/src-tauri
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -280,16 +284,39 @@ fn delete_account(app: AppHandle, accountId: String) -> Result<(), String> {
 
 #[tauri::command]
 fn start_on_demand_scan(app: AppHandle, accountId: String) -> Result<(), String> {
+    let cancel = {
+        let cancels = app.state::<ScanManager>();
+        let mut map = cancels
+            .cancels
+            .lock()
+            .map_err(|_| "scan lock poisoned".to_string())?;
+        if map.contains_key(&accountId) {
+            return Err("Scan is already running for this account".to_string());
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        map.insert(accountId.clone(), cancel.clone());
+        cancel
+    };
+
+    let app2 = app.clone();
+    let account_id2 = accountId.clone();
     tauri::async_runtime::spawn(async move {
         let _ = run_scan_process(
-            app,
-            accountId,
+            app2.clone(),
+            account_id2.clone(),
             "latest".to_string(),
             None,
             None,
             Some("idle".to_string()),
+            Some(cancel),
         );
+
+        // Always clear running state
+        if let Ok(mut map) = app2.state::<ScanManager>().cancels.lock() {
+            map.remove(&account_id2);
+        }
     });
+
     Ok(())
 }
 
@@ -327,6 +354,7 @@ fn start_watch(app: AppHandle, state: State<WatchManager>, accountId: String) ->
                 None,
                 Some(25),
                 Some("watching".to_string()),
+                Some(stop2.clone()),
             );
 
             let mut slept = 0u64;
@@ -372,6 +400,27 @@ fn stop_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> 
     Ok(())
 }
 
+#[tauri::command]
+fn cancel_scan(app: AppHandle, accountId: String) -> Result<(), String> {
+    let cancels = app.state::<ScanManager>();
+    let map = cancels
+        .cancels
+        .lock()
+        .map_err(|_| "scan lock poisoned".to_string())?;
+    if let Some(token) = map.get(&accountId) {
+        token.store(true, Ordering::Relaxed);
+        let _ = app.emit(
+            "scan_log",
+            ScanLogEvent {
+                accountId,
+                line: "Stop requested: cancelling scan…".to_string(),
+                stream: "stdout".to_string(),
+            },
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ScanResult {
     lastSeenUid: u32,
@@ -386,6 +435,7 @@ fn run_scan_process(
     explicit_latest_n: Option<u32>,
     max_messages: Option<u32>,
     status_after: Option<String>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<(), String> {
     let emit_error = |msg: String| {
         let _ = app.emit(
@@ -545,7 +595,30 @@ fn run_scan_process(
         }));
     }
 
-    let status = child.wait();
+    let mut cancelled = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Ok(s),
+            Ok(None) => {
+                if let Some(token) = &cancel {
+                    if token.load(Ordering::Relaxed) && !cancelled {
+                        cancelled = true;
+                        let _ = app.emit(
+                            "scan_log",
+                            ScanLogEvent {
+                                accountId: account_id.clone(),
+                                line: "Cancelling scan (killing node process)…".to_string(),
+                                stream: "stderr".to_string(),
+                            },
+                        );
+                        let _ = child.kill();
+                    }
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => break Err(e),
+        }
+    };
 
     // Ensure we consumed all stdout/stderr (and parsed @@SCAN_RESULT@@) before proceeding
     for h in join_handles {
@@ -598,12 +671,16 @@ pub fn run() {
         .manage(WatchManager {
             watchers: Mutex::new(HashMap::new()),
         })
+        .manage(ScanManager {
+            cancels: Mutex::new(HashMap::new()),
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             load_accounts,
             upsert_account,
             delete_account,
             start_on_demand_scan,
+            cancel_scan,
             start_watch,
             stop_watch
         ])
