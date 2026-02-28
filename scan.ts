@@ -84,6 +84,15 @@ async function main() {
       uidLock.release();
     }
 
+    const preFilterCount = uids.length;
+    uids = uids.filter((uid) => uid > sinceUid);
+    if (preFilterCount !== uids.length) {
+      log(
+        config.label,
+        `Auto scan: ignored ${preFilterCount - uids.length} UID(s) <= lastSeenUid=${sinceUid} (server returned unexpected UIDs)`,
+      );
+    }
+
     uids.sort((a, b) => a - b);
     if (maxMessages && uids.length > maxMessages) {
       uids = uids.slice(0, maxMessages);
