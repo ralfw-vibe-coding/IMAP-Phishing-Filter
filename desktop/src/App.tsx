@@ -90,6 +90,11 @@ function describeContinuous(p: ContinuousPolicy) {
   }
 }
 
+function relevantSettingsLabel(a: Account) {
+  if (a.mode === "continuous") return `Continuous: ${describeContinuous(a.continuous)}`;
+  return `On demand: ${describeOnDemand(a.onDemand)}`;
+}
+
 function passwordLabel(hasPassword: boolean) {
   return hasPassword ? "Stored (Keychain)" : "Missing";
 }
@@ -551,10 +556,7 @@ function AppInner() {
                         Mode: <strong>{a.mode === "on_demand" ? "On demand" : "Continuous"}</strong>
                       </span>
                       <span className="pill">
-                        On demand: <strong>{describeOnDemand(a.onDemand)}</strong>
-                      </span>
-                      <span className="pill">
-                        Continuous: <strong>{describeContinuous(a.continuous)}</strong>
+                        <strong>{relevantSettingsLabel(a)}</strong>
                       </span>
                     </div>
                   </div>

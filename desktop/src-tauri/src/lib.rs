@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
+    thread::JoinHandle,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -459,7 +460,7 @@ fn run_scan_process(
         },
     );
 
-    let (tx, rx) = std::sync::mpsc::channel::<ScanResult>();
+    let scan_result: Arc<Mutex<Option<ScanResult>>> = Arc::new(Mutex::new(None));
 
     let mut cmd = Command::new("node");
     cmd.current_dir(&root)
@@ -497,16 +498,20 @@ fn run_scan_process(
         }
     };
 
+    let mut join_handles: Vec<JoinHandle<()>> = vec![];
+
     if let Some(stdout) = child.stdout.take() {
         let app2 = app.clone();
         let acc2 = account_id.clone();
-        let tx2 = tx.clone();
-        std::thread::spawn(move || {
+        let scan_result2 = scan_result.clone();
+        join_handles.push(std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().flatten() {
                 if let Some(rest) = line.strip_prefix("@@SCAN_RESULT@@ ") {
                     if let Ok(parsed) = serde_json::from_str::<ScanResult>(rest.trim()) {
-                        let _ = tx2.send(parsed);
+                        if let Ok(mut guard) = scan_result2.lock() {
+                            *guard = Some(parsed);
+                        }
                     }
                     continue;
                 }
@@ -519,13 +524,13 @@ fn run_scan_process(
                     },
                 );
             }
-        });
+        }));
     }
 
     if let Some(stderr) = child.stderr.take() {
         let app2 = app.clone();
         let acc2 = account_id.clone();
-        std::thread::spawn(move || {
+        join_handles.push(std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 let _ = app2.emit(
@@ -537,10 +542,15 @@ fn run_scan_process(
                     },
                 );
             }
-        });
+        }));
     }
 
     let status = child.wait();
+
+    // Ensure we consumed all stdout/stderr (and parsed @@SCAN_RESULT@@) before proceeding
+    for h in join_handles {
+        let _ = h.join();
+    }
 
     if let Ok(s) = status {
         if !s.success() {
@@ -556,8 +566,19 @@ fn run_scan_process(
     }
 
     // Update lastSeenUid if provided
-    if let Ok(res) = rx.recv_timeout(Duration::from_millis(500)) {
-        let _ = update_last_seen_uid(&app, &account_id, res.lastSeenUid);
+    if let Ok(guard) = scan_result.lock() {
+        if let Some(res) = guard.clone() {
+            let _ = update_last_seen_uid(&app, &account_id, res.lastSeenUid);
+        } else {
+            let _ = app.emit(
+                "scan_log",
+                ScanLogEvent {
+                    accountId: account_id.clone(),
+                    line: "Warning: scan did not report @@SCAN_RESULT@@ (lastSeenUid not updated)".to_string(),
+                    stream: "stderr".to_string(),
+                },
+            );
+        }
     }
 
     let _ = app.emit(
