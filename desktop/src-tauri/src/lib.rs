@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    collections::VecDeque,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
     thread,
     thread::JoinHandle,
     sync::{
@@ -16,6 +18,8 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const KEYCHAIN_SERVICE: &str = "imap-phishing-filter";
+
+const LOG_BUFFER_MAX: usize = 2000;
 
 fn macos_clamshell_state() -> Option<bool> {
     if !cfg!(target_os = "macos") {
@@ -121,17 +125,31 @@ struct AccountView {
     hasPassword: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScanLogEvent {
     accountId: String,
     line: String,
     stream: String, // "stdout" | "stderr"
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredLogLine {
+    at: String,
+    #[serde(flatten)]
+    evt: ScanLogEvent,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ScanStatusEvent {
     accountId: String,
     status: String, // "scanning" | "idle" | "error"
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackendInfo {
+    session_id: String,
+    started_at: String,
 }
 
 struct WatchEntry {
@@ -147,15 +165,66 @@ struct ScanManager {
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
+struct LogStore {
+    buf: Mutex<VecDeque<StoredLogLine>>,
+    session: BackendInfo,
+}
+
 fn emit_log(app: &AppHandle, account_id: &str, line: &str, stream: &str) {
-    let _ = app.emit(
-        "scan_log",
-        ScanLogEvent {
-            accountId: account_id.to_string(),
-            line: line.to_string(),
-            stream: stream.to_string(),
-        },
-    );
+    let evt = ScanLogEvent {
+        accountId: account_id.to_string(),
+        line: line.to_string(),
+        stream: stream.to_string(),
+    };
+    emit_scan_line(app, evt);
+}
+
+fn logs_file(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create app data dir: {e}"))?;
+    Ok(dir.join("run.log.jsonl"))
+}
+
+fn append_log_to_disk(app: &AppHandle, line: &StoredLogLine) {
+    let path = match logs_file(app) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let raw = match serde_json::to_string(line) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{raw}\n").as_bytes()));
+}
+
+fn emit_scan_line(app: &AppHandle, evt: ScanLogEvent) {
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let stored = StoredLogLine {
+        at: at.to_string(),
+        evt: evt.clone(),
+    };
+
+    if let Some(store) = app.try_state::<LogStore>() {
+        if let Ok(mut guard) = store.buf.lock() {
+            guard.push_back(stored.clone());
+            while guard.len() > LOG_BUFFER_MAX {
+                guard.pop_front();
+            }
+        }
+    }
+    append_log_to_disk(app, &stored);
+
+    let _ = app.emit("scan_log", evt);
 }
 
 fn emit_status(app: &AppHandle, account_id: &str, status: &str) {
@@ -166,6 +235,45 @@ fn emit_status(app: &AppHandle, account_id: &str, status: &str) {
             status: status.to_string(),
         },
     );
+}
+
+#[tauri::command]
+fn get_backend_info(app: AppHandle) -> Result<BackendInfo, String> {
+    let store = app.state::<LogStore>();
+    Ok(store.session.clone())
+}
+
+#[tauri::command]
+fn load_recent_logs(app: AppHandle, limit: Option<u32>) -> Result<Vec<ScanLogEvent>, String> {
+    let limit = limit.unwrap_or(300).min(2000) as usize;
+
+    // Prefer in-memory buffer (survives webview reload).
+    if let Some(store) = app.try_state::<LogStore>() {
+        if let Ok(guard) = store.buf.lock() {
+            let slice_start = guard.len().saturating_sub(limit);
+            return Ok(guard
+                .iter()
+                .skip(slice_start)
+                .map(|l| l.evt.clone())
+                .collect());
+        }
+    }
+
+    // Fallback: read from disk (survives backend restarts).
+    let path = logs_file(&app)?;
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let raw = fs::read_to_string(&path).map_err(|e| format!("Failed to read logs: {e}"))?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let slice_start = lines.len().saturating_sub(limit);
+    let mut out: Vec<ScanLogEvent> = vec![];
+    for line in lines.iter().skip(slice_start) {
+        if let Ok(parsed) = serde_json::from_str::<StoredLogLine>(line) {
+            out.push(parsed.evt);
+        }
+    }
+    Ok(out)
 }
 
 fn start_watch_inner(app: AppHandle, state: &WatchManager, account_id: String) -> Result<bool, String> {
@@ -282,6 +390,75 @@ fn repo_root() -> PathBuf {
     if let Some(root) = manifest_dir.parent().and_then(|p| p.parent()) {
         return root.to_path_buf();
     }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn resolve_node_binary() -> String {
+    // Finder-launched apps often have a minimal PATH; prefer well-known install locations.
+    if let Ok(p) = std::env::var("PHISHINGKILLER_NODE_PATH") {
+        let p = p.trim().to_string();
+        if !p.is_empty() {
+            return p;
+        }
+    }
+
+    let mut candidates: Vec<String> = vec![
+        "/opt/homebrew/bin/node".to_string(),
+        "/usr/local/bin/node".to_string(),
+        "/usr/bin/node".to_string(),
+    ];
+
+    if let Ok(home) = std::env::var("HOME") {
+        // Volta
+        candidates.push(format!("{home}/.volta/bin/node"));
+        // asdf
+        candidates.push(format!("{home}/.asdf/shims/node"));
+
+        // nvm: pick the latest version directory if present
+        let nvm_root = PathBuf::from(format!("{home}/.nvm/versions/node"));
+        if let Ok(entries) = fs::read_dir(&nvm_root) {
+            let mut bins: Vec<String> = vec![];
+            for e in entries.flatten() {
+                if let Ok(ft) = e.file_type() {
+                    if !ft.is_dir() {
+                        continue;
+                    }
+                }
+                let p = e.path().join("bin").join("node");
+                if p.exists() {
+                    bins.push(p.to_string_lossy().to_string());
+                }
+            }
+            bins.sort();
+            if let Some(last) = bins.last().cloned() {
+                candidates.push(last);
+            }
+        }
+    }
+
+    for path in candidates {
+        if Path::new(&path).exists() {
+            return path;
+        }
+    }
+
+    // Last resort: rely on PATH
+    "node".to_string()
+}
+
+fn resolve_runtime_root(app: &AppHandle) -> PathBuf {
+    // Dev: repo root (contains phishingdetection_prompt.txt + dist/)
+    let dev_root = repo_root();
+    if dev_root.join("dist").join("scan.js").exists() && dev_root.join("phishingdetection_prompt.txt").exists() {
+        return dev_root;
+    }
+
+    // Prod: bundled resources dir (contains dist/ + phishingdetection_prompt.txt)
+    if let Ok(dir) = app.path().resource_dir() {
+        return dir;
+    }
+
+    // Fallback
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
@@ -631,12 +808,18 @@ fn run_scan_process(
 
     let since_uid = account.lastSeenUid;
 
-    let root = repo_root();
+    let root = resolve_runtime_root(&app);
     let scan_js = root.join("dist").join("scan.js");
     if !scan_js.exists() {
+        let res = app
+            .path()
+            .resource_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
         emit_error(format!(
-            "Missing scan executable at {}. Run `npm run build` in the repo root first.",
-            scan_js.display()
+            "Missing scan executable at {} (resource_dir={}). Run `npm run build` in the repo root first, then `npm run dist:mac`.",
+            scan_js.display(),
+            res
         ));
         return Ok(());
     }
@@ -651,7 +834,9 @@ fn run_scan_process(
 
     let scan_result: Arc<Mutex<Option<ScanResult>>> = Arc::new(Mutex::new(None));
 
-    let mut cmd = Command::new("node");
+    let node_bin = resolve_node_binary();
+
+    let mut cmd = Command::new(node_bin);
     cmd.current_dir(&root)
         .arg(scan_js)
         .env(
@@ -704,8 +889,8 @@ fn run_scan_process(
                     }
                     continue;
                 }
-                let _ = app2.emit(
-                    "scan_log",
+                emit_scan_line(
+                    &app2,
                     ScanLogEvent {
                         accountId: acc2.clone(),
                         line,
@@ -722,8 +907,8 @@ fn run_scan_process(
         join_handles.push(std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                let _ = app2.emit(
-                    "scan_log",
+                emit_scan_line(
+                    &app2,
                     ScanLogEvent {
                         accountId: acc2.clone(),
                         line,
@@ -815,6 +1000,12 @@ fn run_scan_process(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let session_id = format!("{}-{}", std::process::id(), started_at);
+
     tauri::Builder::default()
         .manage(WatchManager {
             watchers: Mutex::new(HashMap::new()),
@@ -822,9 +1013,20 @@ pub fn run() {
         .manage(ScanManager {
             cancels: Mutex::new(HashMap::new()),
         })
+        .manage(LogStore {
+            buf: Mutex::new(VecDeque::new()),
+            session: BackendInfo {
+                session_id: session_id.clone(),
+                started_at: started_at.to_string(),
+            },
+        })
         .setup(|app| {
+            let handle = app.handle().clone();
+            let store = handle.state::<LogStore>();
+            emit_log(&handle, "app", &format!("Backend started (session={})", store.session.session_id), "stdout");
+
             if cfg!(target_os = "macos") {
-                let handle = app.handle().clone();
+                let handle = handle.clone();
 
                 tauri::async_runtime::spawn_blocking(move || {
                     // Default state: assume open (avoid stopping work on transient errors)
@@ -920,6 +1122,8 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            get_backend_info,
+            load_recent_logs,
             load_accounts,
             upsert_account,
             delete_account,

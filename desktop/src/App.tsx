@@ -57,6 +57,14 @@ function formatTime(d: Date) {
   return `${hh}:${mm}:${ss}`;
 }
 
+function parseIsoPrefix(line: string): Date | null {
+  // scan.ts logs start with: [2026-02-28T14:16:33.334Z] ...
+  const m = /^\[([0-9TZ:.\-]+)\]\s/.exec(line);
+  if (!m) return null;
+  const d = new Date(m[1]!);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function statusLabel(status: AccountStatus) {
   switch (status) {
     case "idle":
@@ -135,9 +143,7 @@ function AppInner() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const accountsRef = useRef<Account[]>([]);
   const didInitialLoadRef = useRef(false);
-  const [logEntries, setLogEntries] = useState<LogEntry[]>(() => [
-    { id: randomId("log"), at: new Date(), level: "info", message: "App started." },
-  ]);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>(() => []);
 
   const [logFilterAccountId, setLogFilterAccountId] = useState<string>("all");
   const [logSearch, setLogSearch] = useState<string>("");
@@ -198,8 +204,8 @@ function AppInner() {
     setDraft(editorInitial);
   }, [editorInitial]);
 
-  const pushLog = (entry: Omit<LogEntry, "id" | "at">) => {
-    const next: LogEntry = { id: randomId("log"), at: new Date(), ...entry };
+  const pushLog = (entry: Omit<LogEntry, "id" | "at"> & { at?: Date }) => {
+    const next: LogEntry = { id: randomId("log"), at: entry.at ?? new Date(), ...entry };
     setLogEntries((prev) => [...prev, next]);
     setTimeout(() => {
       scrollLogToBottom("smooth");
@@ -230,7 +236,54 @@ function AppInner() {
     // Avoid duplicating initial load + logs.
     if (didInitialLoadRef.current) return;
     didInitialLoadRef.current = true;
-    void loadAccounts();
+    void (async () => {
+      // Pull recent backend logs first so we can see if the UI got reloaded.
+      try {
+        const info = (await invoke("get_backend_info")) as { sessionId: string; startedAt: string };
+        const recent = (await invoke("load_recent_logs", { limit: 400 })) as Array<{
+          accountId: string;
+          line: string;
+          stream: string;
+        }>;
+
+        setLogEntries((prev) => {
+          const base = prev.length > 0 ? prev : [];
+          const restored: LogEntry[] = recent.map((r) => {
+            const at = parseIsoPrefix(r.line) ?? new Date();
+            const isPhishing = r.line.includes("PHISHING");
+            const level: LogLevel =
+              r.stream === "stderr"
+                ? "error"
+                : isPhishing
+                  ? "warning"
+                  : r.line.includes("Flagged")
+                    ? "success"
+                    : "info";
+            return {
+              id: randomId("log"),
+              at,
+              level,
+              accountId: r.accountId,
+              accountLabel: r.accountId,
+              message: r.line,
+            };
+          });
+
+          const sessionLine: LogEntry = {
+            id: randomId("log"),
+            at: new Date(),
+            level: "info",
+            accountLabel: "app",
+            message: `UI loaded (backend session=${info.sessionId}).`,
+          };
+          return [...base, ...restored, sessionLine];
+        });
+      } catch (err) {
+        pushLog({ level: "warning", message: `Could not load recent logs: ${String(err)}` });
+      }
+
+      await loadAccounts();
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -259,6 +312,7 @@ function AppInner() {
       const acc = accountsRef.current.find((a) => a.id === event.payload.accountId);
       const msg = event.payload.line;
       const isPhishing = msg.includes("PHISHING");
+      const at = parseIsoPrefix(msg) ?? new Date();
       const level: LogLevel =
         event.payload.stream === "stderr"
           ? "error"
@@ -268,6 +322,7 @@ function AppInner() {
               ? "success"
               : "info";
       pushLog({
+        at,
         level,
         accountId: event.payload.accountId,
         accountLabel: acc?.label ?? event.payload.accountId,
@@ -497,7 +552,7 @@ function AppInner() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand__title">IMAP Phishing Filter</div>
+          <div className="brand__title">PhishingKiller</div>
           <div className="brand__subtitle">Desktop tool (accounts + scans)</div>
         </div>
 
