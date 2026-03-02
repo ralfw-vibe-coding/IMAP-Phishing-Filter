@@ -25,6 +25,12 @@ function scanResultLine(payload: unknown) {
   console.log(`@@SCAN_RESULT@@ ${JSON.stringify(payload)}`);
 }
 
+function scanProgressLine(payload: unknown) {
+  // This line is parsed by the desktop app to persist progress even if the scan crashes.
+  // eslint-disable-next-line no-console
+  console.log(`@@SCAN_PROGRESS@@ ${JSON.stringify(payload)}`);
+}
+
 async function main() {
   const raw = process.env.SCAN_ACCOUNT_JSON;
   if (!raw) throw new Error("Missing SCAN_ACCOUNT_JSON env var");
@@ -65,16 +71,18 @@ async function main() {
   const baselineUid = Math.max(0, (opened.uidNext ?? 1) - 1);
 
   const ensurePhishingMailbox = async () => {
+    const delimiter = opened.delimiter ?? ".";
+    const phishingPath = `INBOX${delimiter}Phishing`;
     try {
-      await client.mailboxCreate("Phishing");
-      log(config.label, 'Created mailbox folder "Phishing"');
+      await client.mailboxCreate(phishingPath);
+      log(config.label, `Created mailbox folder "${phishingPath}"`);
     } catch (err) {
       const msg = (err as Error)?.message ?? String(err);
       // If it already exists, ignore. Otherwise still proceed (MOVE will fail with a clearer error).
       if (/exists|already/i.test(msg)) {
         return;
       }
-      log(config.label, `Warning: failed to create mailbox "Phishing": ${msg}`);
+      log(config.label, `Warning: failed to create mailbox "${phishingPath}": ${msg}`);
     }
   };
 
@@ -82,13 +90,15 @@ async function main() {
     if (uids.length === 0) return;
 
     if (phishingAction === "move") {
+      const delimiter = opened.delimiter ?? ".";
+      const phishingPath = `INBOX${delimiter}Phishing`;
       log(config.label, `Collected ${uids.length} phishing message(s) to move (context=${context})`);
       await ensurePhishingMailbox();
       const lock = await client.getMailboxLock(config.folder);
       try {
-        const res = await client.messageMove(uids, "Phishing", { uid: true });
+        const res = await client.messageMove(uids, phishingPath, { uid: true });
         const moved = typeof res === "object" && res && "uidMap" in (res as any) ? (res as any).uidMap?.size : null;
-        log(config.label, `Moved ${uids.length} message(s) to "Phishing"${moved !== null ? ` (uidMap=${moved})` : ""}`);
+        log(config.label, `Moved ${uids.length} message(s) to "${phishingPath}"${moved !== null ? ` (uidMap=${moved})` : ""}`);
       } finally {
         lock.release();
       }
@@ -203,6 +213,9 @@ async function main() {
         log(config.label, `UID ${uid}: PHISHING (pending flagging)`);
         log(config.label, `UID ${uid}: Explanation: ${result.explanation}`);
       }
+
+      // Persist progress after every checked message so we don't re-check it after a crash.
+      scanProgressLine({ lastSeenUid: uid });
     }
 
     if (phishingUids.length > 0) {
@@ -294,6 +307,9 @@ async function main() {
       log(config.label, `UID ${uid}: PHISHING (pending flagging)`);
       log(config.label, `UID ${uid}: Explanation: ${result.explanation}`);
     }
+
+    // Persist progress after every checked message so we don't re-check it after a crash.
+    scanProgressLine({ lastSeenUid: uid });
   }
 
   if (phishingUids.length > 0) {

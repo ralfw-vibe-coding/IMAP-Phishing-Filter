@@ -175,7 +175,7 @@ struct WatchManager {
 }
 
 struct ScanManager {
-    cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    running: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 struct LogStore {
@@ -311,6 +311,33 @@ fn start_watch_inner(app: AppHandle, state: &WatchManager, account_id: String) -
                 break;
             }
 
+            // Ensure only one scan runs per account at a time (also prevents overlap with on-demand scans).
+            let cancel_token = loop {
+                if stop2.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                let scans = app2.state::<ScanManager>();
+                let mut running = match scans.running.lock() {
+                    Ok(m) => m,
+                    Err(_) => {
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                };
+
+                if running.contains_key(&id2) {
+                    // Someone else is scanning (usually an on-demand scan). Wait until it finishes.
+                    drop(running);
+                    thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+
+                let token = Arc::new(AtomicBool::new(false));
+                running.insert(id2.clone(), token.clone());
+                break token;
+            };
+
             // Run incremental scan (since lastSeenUid). Limit per tick to keep it safe/cost-bounded.
             let _ = run_scan_process(
                 app2.clone(),
@@ -319,8 +346,13 @@ fn start_watch_inner(app: AppHandle, state: &WatchManager, account_id: String) -
                 None,
                 Some(25),
                 Some("watching".to_string()),
-                Some(stop2.clone()),
+                Some(cancel_token.clone()),
             );
+
+            // Release scan slot
+            if let Ok(mut running) = app2.state::<ScanManager>().running.lock() {
+                running.remove(&id2);
+            }
 
             // Sleep (coarse). If macOS clamshell closes, the global monitor will abort this watcher.
             let mut slept = 0u64;
@@ -380,7 +412,7 @@ fn stop_all_watches(app: &AppHandle, state: &WatchManager, status: &str) -> Vec<
 
 fn cancel_all_scans(app: &AppHandle, scans: &ScanManager) -> usize {
     let mut cancelled = 0usize;
-    let map = match scans.cancels.lock() {
+    let map = match scans.running.lock() {
         Ok(m) => m,
         Err(_) => return 0,
     };
@@ -663,7 +695,7 @@ fn start_on_demand_scan(app: AppHandle, accountId: String) -> Result<(), String>
     let cancel = {
         let cancels = app.state::<ScanManager>();
         let mut map = cancels
-            .cancels
+            .running
             .lock()
             .map_err(|_| "scan lock poisoned".to_string())?;
         if map.contains_key(&accountId) {
@@ -688,7 +720,7 @@ fn start_on_demand_scan(app: AppHandle, accountId: String) -> Result<(), String>
         );
 
         // Always clear running state
-        if let Ok(mut map) = app2.state::<ScanManager>().cancels.lock() {
+        if let Ok(mut map) = app2.state::<ScanManager>().running.lock() {
             map.remove(&account_id2);
         }
     });
@@ -733,7 +765,7 @@ fn stop_watch(app: AppHandle, state: State<WatchManager>, accountId: String) -> 
 fn cancel_scan(app: AppHandle, accountId: String) -> Result<(), String> {
     let cancels = app.state::<ScanManager>();
     let map = cancels
-        .cancels
+        .running
         .lock()
         .map_err(|_| "scan lock poisoned".to_string())?;
     if let Some(token) = map.get(&accountId) {
@@ -909,6 +941,16 @@ fn run_scan_process(
                     }
                     continue;
                 }
+                if let Some(rest) = line.strip_prefix("@@SCAN_PROGRESS@@ ") {
+                    if let Ok(parsed) = serde_json::from_str::<ScanResult>(rest.trim()) {
+                        let _ = update_last_seen_uid(&app2, &acc2, parsed.lastSeenUid);
+                    } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
+                        if let Some(uid) = v.get("lastSeenUid").and_then(|x| x.as_u64()) {
+                            let _ = update_last_seen_uid(&app2, &acc2, uid as u32);
+                        }
+                    }
+                    continue;
+                }
                 emit_scan_line(
                     &app2,
                     ScanLogEvent {
@@ -1031,7 +1073,7 @@ pub fn run() {
             watchers: Mutex::new(HashMap::new()),
         })
         .manage(ScanManager {
-            cancels: Mutex::new(HashMap::new()),
+            running: Mutex::new(HashMap::new()),
         })
         .manage(LogStore {
             buf: Mutex::new(VecDeque::new()),
