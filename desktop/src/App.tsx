@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Component, type ErrorInfo, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
+import { APP_NAME, APP_VERSION_DISPLAY, appTitle } from "./version";
 
 type AccountMode = "on_demand" | "continuous";
 
@@ -52,10 +54,10 @@ function randomId(prefix: string) {
 }
 
 function formatTime(d: Date) {
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "medium",
+  }).format(d);
 }
 
 function parseIsoPrefix(line: string): Date | null {
@@ -64,6 +66,12 @@ function parseIsoPrefix(line: string): Date | null {
   if (!m) return null;
   const d = new Date(m[1]!);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function renderLogMessage(message: string): string {
+  const leading = message.match(/^ +/)?.[0].length ?? 0;
+  if (leading <= 0) return message;
+  return `${"\u00A0".repeat(leading)}${message.slice(leading)}`;
 }
 
 function statusLabel(status: AccountStatus) {
@@ -262,15 +270,13 @@ function AppInner() {
           const base = prev.length > 0 ? prev : [];
           const restored: LogEntry[] = recent.map((r) => {
             const at = parseIsoPrefix(r.line) ?? new Date();
-            const isPhishing = r.line.includes("PHISHING");
+            const isPhishingReason = r.line.includes("PHISHING:");
             const level: LogLevel =
               r.stream === "stderr"
                 ? "error"
-                : isPhishing
-                  ? "warning"
-                  : r.line.includes("Flagged")
-                    ? "success"
-                    : "info";
+                : isPhishingReason
+                  ? "error"
+                  : "info";
             return {
               id: randomId("log"),
               at,
@@ -300,6 +306,12 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
+    const title = appTitle();
+    document.title = title;
+    void getCurrentWindow().setTitle(title).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     accountsRef.current = accounts;
   }, [accounts]);
 
@@ -323,16 +335,14 @@ function AppInner() {
     void attach(listen<{ accountId: string; line: string; stream: string }>("scan_log", (event) => {
       const acc = accountsRef.current.find((a) => a.id === event.payload.accountId);
       const msg = event.payload.line;
-      const isPhishing = msg.includes("PHISHING");
+      const isPhishingReason = msg.includes("PHISHING:");
       const at = parseIsoPrefix(msg) ?? new Date();
       const level: LogLevel =
         event.payload.stream === "stderr"
           ? "error"
-          : isPhishing
-            ? "warning"
-            : msg.includes("Flagged")
-              ? "success"
-              : "info";
+          : isPhishingReason
+            ? "error"
+            : "info";
       pushLog({
         at,
         level,
@@ -565,7 +575,9 @@ function AppInner() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="brand__title">PhishingKiller</div>
+          <div className="brand__title">
+            {APP_NAME} {APP_VERSION_DISPLAY}
+          </div>
           <div className="brand__subtitle">Desktop tool (accounts + scans)</div>
         </div>
 
@@ -759,7 +771,7 @@ function AppInner() {
                   <div key={e.id} className={`log__row log__row--${e.level}`}>
                     <div className="log__time">{formatTime(e.at)}</div>
                     <div className="log__tag">{e.accountLabel ?? "app"}</div>
-                    <div className="log__msg">{e.message}</div>
+                    <div className="log__msg">{renderLogMessage(e.message)}</div>
                   </div>
                 ))
               )}

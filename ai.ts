@@ -5,20 +5,6 @@ export type AiPhishingAssessment = {
   explanation: string;
 };
 
-function now() {
-  return new Date().toISOString();
-}
-
-function log(message: string, extra?: unknown) {
-  if (extra !== undefined) {
-    // eslint-disable-next-line no-console
-    console.log(`[${now()}] [ai] ${message}`, extra);
-    return;
-  }
-  // eslint-disable-next-line no-console
-  console.log(`[${now()}] [ai] ${message}`);
-}
-
 function extractJsonObject(text: string): string {
   const first = text.indexOf("{");
   const last = text.lastIndexOf("}");
@@ -41,7 +27,6 @@ export async function runPhishingAssessmentPrompt(prompt: string): Promise<AiPhi
 
   const client = new OpenAI({ apiKey });
   const input = prompt;
-  log("Calling OpenAI model gpt-5-mini");
 
   const response = await client.responses.create({
     model: "gpt-5-mini",
@@ -66,13 +51,11 @@ export async function runPhishingAssessmentPrompt(prompt: string): Promise<AiPhi
 
   const raw = response.output_text ?? "";
   const jsonText = extractJsonObject(raw);
-  log("Model responded (raw text length)", raw.length);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonText);
   } catch (err) {
-    log("Failed to parse model JSON", { err: (err as Error).message, jsonText });
     throw new Error("AI response was not valid JSON");
   }
 
