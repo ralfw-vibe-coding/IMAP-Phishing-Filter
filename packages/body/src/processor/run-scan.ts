@@ -46,6 +46,7 @@ export async function runScan(request: ScanRequest, deps: RunScanDeps): Promise<
 
     if (uids.length === 0) {
       const emptyResult = { lastSeenUid: baselineUid, processed: 0, flagged: 0 };
+      await deps.state.setLastSeenUid(account.id, emptyResult.lastSeenUid);
       await deps.observer?.onResult?.(emptyResult);
       logger?.info("CHECK END checked=0");
       return emptyResult;
@@ -88,6 +89,7 @@ export async function runScan(request: ScanRequest, deps: RunScanDeps): Promise<
       processed: uids.length,
       flagged: phishingUids.length,
     };
+    await deps.state.setLastSeenUid(account.id, result.lastSeenUid);
     await deps.observer?.onResult?.(result);
     logger?.info(`CHECK END checked=${result.processed}`);
     return result;

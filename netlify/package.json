@@ -3,6 +3,11 @@
   "private": true,
   "type": "module",
   "version": "1.0.0",
+  "dependencies": {
+    "imapflow": "^1.0.0",
+    "mailparser": "^3.6.8",
+    "openai": "^6.25.0"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "dev": "npx netlify dev",

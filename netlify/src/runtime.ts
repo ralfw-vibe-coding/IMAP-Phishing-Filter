@@ -6,12 +6,14 @@ import {
   FileAtomicStore,
   InMemoryAtomicStore,
   KvStateProvider,
+  UpstashAtomicStore,
   type AtomicKeyValueStore,
 } from "../../packages/providers-netlify/src/index.js";
 import { ImapflowMailboxProvider, OpenAiPhishingProvider } from "../../packages/providers-node/src/index.js";
 import { buildImapAccountConfigFromEnvShape } from "../../imap.js";
 
 export const NETLIFY_VERSION_DISPLAY = "1.0.0.0";
+const DEFAULT_NETLIFY_PROMPT_PATH = "/var/task/phishingdetection_prompt.txt";
 
 type EnvAccountShape = {
   id?: string;
@@ -72,17 +74,33 @@ function asOptionalTreatment(
 }
 
 let storeSingleton: AtomicKeyValueStore | null = null;
+let storeKindSingleton: "upstash" | "file" | "memory" | null = null;
 
 function createStoreFromEnv(): AtomicKeyValueStore {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (upstashUrl && upstashToken) {
+    storeKindSingleton = "upstash";
+    return new UpstashAtomicStore({
+      baseUrl: upstashUrl,
+      token: upstashToken,
+    });
+  }
+
   const filePath = process.env.NETLIFY_ATOMIC_STORE_FILE?.trim();
-  if (filePath) return new FileAtomicStore(filePath);
+  if (filePath) {
+    storeKindSingleton = "file";
+    return new FileAtomicStore(filePath);
+  }
 
   // Best-effort default for serverless environments. /tmp is writable on Netlify functions.
   // This is still instance-local and not a globally consistent datastore.
   if (typeof process !== "undefined") {
+    storeKindSingleton = "file";
     return new FileAtomicStore("/tmp/phishingkiller-atomic-store.json");
   }
 
+  storeKindSingleton = "memory";
   return new InMemoryAtomicStore();
 }
 
@@ -195,7 +213,8 @@ function createRuntime() {
   const store = getStore();
   const lease = new AtomicLeaseProvider(store);
   const mailbox = new ImapflowMailboxProvider();
-  const ai = new OpenAiPhishingProvider();
+  const promptPath = process.env.PHISHING_PROMPT_PATH?.trim() || DEFAULT_NETLIFY_PROMPT_PATH;
+  const ai = new OpenAiPhishingProvider({ promptPath });
   const state = new KvStateProvider(store, "state:lastSeen");
   const accounts = parseAccounts();
   const maxMessagesPerTick = Math.max(
@@ -389,6 +408,8 @@ export async function isBackgroundBusy(): Promise<boolean> {
 
 export async function getScanStatus(): Promise<{
   version: string;
+  storeKind: "upstash" | "file" | "memory";
+  upstashConfigured: boolean;
   nowUnixMs: number;
   busy: boolean;
   status: RunStatusRecord | null;
@@ -408,6 +429,10 @@ export async function getScanStatus(): Promise<{
 
   return {
     version: NETLIFY_VERSION_DISPLAY,
+    storeKind: storeKindSingleton ?? "memory",
+    upstashConfigured:
+      Boolean(process.env.UPSTASH_REDIS_REST_URL?.trim()) &&
+      Boolean(process.env.UPSTASH_REDIS_REST_TOKEN?.trim()),
     nowUnixMs: Date.now(),
     busy,
     status,
