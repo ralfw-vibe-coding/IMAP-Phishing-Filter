@@ -1,0 +1,11 @@
+{
+  "name": "phishingkiller-netlify",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "dev": "npx netlify dev",
+    "deploy": "npx netlify deploy --prod"
+  }
+}

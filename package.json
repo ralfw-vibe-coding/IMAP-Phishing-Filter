@@ -3,19 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "netlify"
+  ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "dev": "npm run build && node dist/main.js",
     "dev:tsx": "tsx main.ts",
+    "version:bump": "node scripts/version-bump.mjs --target all",
+    "version:bump:desktop": "node scripts/version-bump.mjs --target desktop",
+    "version:bump:netlify": "node scripts/version-bump.mjs --target netlify",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dist:mac": "bash scripts/dist-mac.sh",
     "deploy:mac": "bash scripts/deploy-mac.sh",
     "desktop:dev": "npm -C desktop run tauri dev",
-    "desktop:build": "npm -C desktop run build"
+    "desktop:build": "npm -C desktop run build",
+    "netlify:dev": "npm -C netlify run dev",
+    "netlify:typecheck": "npm -C netlify run typecheck",
+    "body:build": "npm -C packages/body run build",
+    "providers:build": "npm -C packages/providers-node run build && npm -C packages/providers-netlify run build",
+    "dist:desktop": "npm run dist:mac",
+    "dist:netlify": "npm -C netlify run deploy"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
