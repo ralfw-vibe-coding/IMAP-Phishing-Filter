@@ -12,7 +12,7 @@ import {
 import { ImapflowMailboxProvider, OpenAiPhishingProvider } from "../../packages/providers-node/src/index.js";
 import { buildImapAccountConfigFromEnvShape } from "../../imap.js";
 
-export const NETLIFY_VERSION_DISPLAY = "1.0.0.0";
+export const NETLIFY_VERSION_DISPLAY = "1.0.0.1";
 const DEFAULT_NETLIFY_PROMPT_PATH = "/var/task/phishingdetection_prompt.txt";
 
 type EnvAccountShape = {
