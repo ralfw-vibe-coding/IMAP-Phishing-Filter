@@ -139,6 +139,7 @@ function renderDashboardHtml(): string {
         <div class="row">
           <button id="refreshBtn">Status laden</button>
           <button id="scanBtn">Scan jetzt starten</button>
+          <button id="healthBtn">Health-Check jetzt auslösen</button>
           <span id="headline" class="muted">lade...</span>
         </div>
       </div>
@@ -235,6 +236,7 @@ function renderDashboardHtml(): string {
       const $ = (id) => document.getElementById(id);
       const refreshBtn = $("refreshBtn");
       const scanBtn = $("scanBtn");
+      const healthBtn = $("healthBtn");
       const newAccountBtn = $("newAccountBtn");
       const headline = $("headline");
       const meta = $("meta");
@@ -458,6 +460,26 @@ function renderDashboardHtml(): string {
         }
       }
 
+      async function runHealthCheckNow() {
+        healthBtn.disabled = true;
+        const old = healthBtn.textContent;
+        healthBtn.textContent = "starte...";
+        try {
+          const res = await fetch("/.netlify/functions/health-check", { method: "POST" });
+          if (!res.ok) {
+            const txt = await res.text();
+            throw new Error("HTTP " + res.status + ": " + txt);
+          }
+          const data = await res.json().catch(() => ({}));
+          alert("Health-Check ausgeführt: " + (data.state ?? "ok"));
+        } catch (e) {
+          alert("Health-Check konnte nicht gestartet werden: " + e);
+        } finally {
+          healthBtn.disabled = false;
+          healthBtn.textContent = old;
+        }
+      }
+
       configAccountsBody.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
@@ -474,6 +496,7 @@ function renderDashboardHtml(): string {
 
       refreshBtn.addEventListener("click", () => { void loadStatus(); });
       scanBtn.addEventListener("click", () => { void runScanNow(); });
+      healthBtn.addEventListener("click", () => { void runHealthCheckNow(); });
       newAccountBtn.addEventListener("click", () => openModal("new"));
       cancelBtn.addEventListener("click", closeModal);
       saveBtn.addEventListener("click", () => { void saveAccountFromForm(); });
