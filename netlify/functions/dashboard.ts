@@ -256,6 +256,7 @@ function renderDashboardHtml(): string {
 
       let currentEditId = null;
       let configAccounts = [];
+      let dashboardPassword = null;
 
       function esc(value) {
         return String(value ?? "")
@@ -283,6 +284,32 @@ function renderDashboardHtml(): string {
           throw new Error((data && data.message) ? data.message : ("HTTP " + res.status));
         }
         return data;
+      }
+
+      async function ensureDashboardAuth() {
+        if (dashboardPassword) return dashboardPassword;
+        const entered = window.prompt("Dashboard Passwort für Kontoänderungen:");
+        if (!entered || entered.trim().length === 0) {
+          throw new Error("Autorisierung abgebrochen");
+        }
+        dashboardPassword = entered.trim();
+        return dashboardPassword;
+      }
+
+      async function apiWithDashboardAuth(path, init) {
+        const pwd = await ensureDashboardAuth();
+        const headers = Object.assign({}, init?.headers ?? {}, {
+          "x-dashboard-password": pwd,
+        });
+        try {
+          return await api(path, Object.assign({}, init ?? {}, { headers }));
+        } catch (error) {
+          const message = String(error ?? "");
+          if (message.includes("Unauthorized")) {
+            dashboardPassword = null;
+          }
+          throw error;
+        }
       }
 
       function openModal(mode, account) {
@@ -347,13 +374,13 @@ function renderDashboardHtml(): string {
         }
 
         if (currentEditId) {
-          await api("/.netlify/functions/accounts-config", {
+          await apiWithDashboardAuth("/.netlify/functions/accounts-config", {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ accountId: currentEditId, account: payload }),
           });
         } else {
-          await api("/.netlify/functions/accounts-config", {
+          await apiWithDashboardAuth("/.netlify/functions/accounts-config", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ account: payload }),
@@ -366,7 +393,7 @@ function renderDashboardHtml(): string {
 
       async function deleteAccount(accountId) {
         if (!confirm("Konto wirklich löschen?")) return;
-        await api("/.netlify/functions/accounts-config?accountId=" + encodeURIComponent(accountId), {
+        await apiWithDashboardAuth("/.netlify/functions/accounts-config?accountId=" + encodeURIComponent(accountId), {
           method: "DELETE",
         });
         await loadConfigAccounts();

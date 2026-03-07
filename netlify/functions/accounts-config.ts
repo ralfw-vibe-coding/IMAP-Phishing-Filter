@@ -8,6 +8,7 @@ import {
 type HandlerEvent = {
   httpMethod?: string;
   body?: string | null;
+  headers?: Record<string, string | undefined>;
   queryStringParameters?: Record<string, string | undefined>;
 };
 type HandlerResponse = { statusCode: number; body: string; headers?: Record<string, string> };
@@ -30,6 +31,24 @@ function parseBody(body: string | null | undefined): unknown {
   }
 }
 
+function hasValidDashboardPassword(event: HandlerEvent): { ok: boolean; reason?: string } {
+  const configured = process.env.DASHBOARD_PASSWORD?.trim();
+  if (!configured) {
+    return { ok: false, reason: "DASHBOARD_PASSWORD is not configured" };
+  }
+
+  const headers = event.headers ?? {};
+  const provided =
+    headers["x-dashboard-password"] ??
+    headers["X-Dashboard-Password"] ??
+    headers["x-dashboard-password".toLowerCase()];
+
+  if (!provided || provided.trim() !== configured) {
+    return { ok: false, reason: "Unauthorized" };
+  }
+  return { ok: true };
+}
+
 export const handler: Handler = async (event) => {
   try {
     const method = (event.httpMethod ?? "GET").toUpperCase();
@@ -40,6 +59,13 @@ export const handler: Handler = async (event) => {
     }
 
     if (method === "POST") {
+      const auth = hasValidDashboardPassword(event);
+      if (!auth.ok) {
+        return json(auth.reason === "Unauthorized" ? 401 : 500, {
+          status: "error",
+          message: auth.reason,
+        });
+      }
       const body = parseBody(event.body) as { account?: unknown };
       if (!body.account) return json(400, { status: "error", message: "Missing account" });
       const account = await createDashboardAccount(body.account);
@@ -47,6 +73,13 @@ export const handler: Handler = async (event) => {
     }
 
     if (method === "PATCH") {
+      const auth = hasValidDashboardPassword(event);
+      if (!auth.ok) {
+        return json(auth.reason === "Unauthorized" ? 401 : 500, {
+          status: "error",
+          message: auth.reason,
+        });
+      }
       const body = parseBody(event.body) as { accountId?: string; account?: unknown };
       if (!body.accountId) return json(400, { status: "error", message: "Missing accountId" });
       if (!body.account) return json(400, { status: "error", message: "Missing account" });
@@ -55,6 +88,13 @@ export const handler: Handler = async (event) => {
     }
 
     if (method === "DELETE") {
+      const auth = hasValidDashboardPassword(event);
+      if (!auth.ok) {
+        return json(auth.reason === "Unauthorized" ? 401 : 500, {
+          status: "error",
+          message: auth.reason,
+        });
+      }
       const accountId = event.queryStringParameters?.accountId;
       if (!accountId) return json(400, { status: "error", message: "Missing accountId" });
       await deleteDashboardAccount(accountId);

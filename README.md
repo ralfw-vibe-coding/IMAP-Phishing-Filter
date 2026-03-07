@@ -136,6 +136,7 @@ Pflicht:
 - `AI_API_KEY`
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
+- `DASHBOARD_PASSWORD` (Passwortschutz für Kontoänderungen im Dashboard)
 
 Empfohlen:
 - `LOG_LEVEL=0` (minimales Logging)
@@ -197,6 +198,10 @@ Auf der Seite:
 - Account-Übersicht (`lastSeenUid`)
 - Button zum Start von `scan-background`
 - IMAP-Konten verwalten: `Neu`, `Bearbeiten`, `Löschen` (Passwort wird nicht angezeigt)
+
+Sicherheit:
+- Für `Neu/Bearbeiten/Löschen` fragt das Dashboard einmalig pro Seitenaufruf nach `DASHBOARD_PASSWORD`.
+- Nach Browser-Reload ist die Autorisierung wieder weg und muss neu eingegeben werden.
 
 Wichtig:
 - Die IMAP-Konten für Netlify-Scans kommen aus Redis (`config:imap_accounts`).
