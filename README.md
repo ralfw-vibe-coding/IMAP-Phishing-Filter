@@ -97,6 +97,7 @@ Dieser Abschnitt beschreibt den Cloud-Betrieb über Netlify Functions:
 - `health-run`: manueller Health-Check (für Dashboard/Button und Tests).
 - `dashboard`: einfache Web-Seite für Status + manuellen Scan-Start.
 - `accounts-config`: API für Kontoverwaltung im Dashboard (Redis-basiert).
+- `runtime-config`: API für Laufzeit-Konfiguration (aktuell `logLevel`) im Dashboard.
 
 ### 1) Netlify Site verbinden
 
@@ -119,6 +120,7 @@ Warum:
 
 Verwendete Redis-Keys:
 - `config:imap_accounts`: IMAP-Konten für Netlify (Quelle für Scans und Dashboard-Verwaltung).
+- `config:runtime`: Laufzeit-Konfiguration (z. B. `logLevel`).
 - `state:lastSeen:<accountId>`: zuletzt gesehene UID je Konto.
 - `scan:status`: letzter Laufstatus (ok/busy/error + Details).
 - `netlify:phishing-scan:global`: Lease/Lock gegen parallele Läufe.
@@ -220,6 +222,11 @@ Bei Netlify im Bereich `Functions`:
 - `1`: zusätzlich Scan-Rahmenlogs (`CHECK START`, `CHECK END`, `CHECK ERROR`)
 - `2`: zusätzlich Orchestrierungs-Logs (`[bg] start/scanning/done/finished/skipped`)
 - `3`: zusätzlich Debug-Details (`lease renew failed`, `progress lastSeenUid=...`)
+
+Wichtig:
+- Harte Fehler (`CHECK ERROR`, Account-Fehler im Background-Worker) werden auf allen Log-Levels geloggt.
+- Fehler in einem Konto stoppen nicht mehr den gesamten Lauf; andere Konten werden weiter geprüft.
+- `LOG_LEVEL` kann im Dashboard gesetzt werden (persistiert in Redis unter `config:runtime`).
 
 ### 6) Health-Check E-Mail mit Resend
 

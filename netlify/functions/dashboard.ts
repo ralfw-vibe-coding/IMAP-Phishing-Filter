@@ -142,6 +142,17 @@ function renderDashboardHtml(): string {
           <button id="healthBtn">Health-Check jetzt auslösen</button>
           <span id="headline" class="muted">lade...</span>
         </div>
+        <div class="row" style="margin-top: 10px;">
+          <label for="logLevelSelect" style="margin: 0;">LOG_LEVEL</label>
+          <select id="logLevelSelect" style="width: auto;">
+            <option value="0">0 (nur Mailzeilen + Phishingwarnungen)</option>
+            <option value="1">1 (+ Scan-Rahmen, inkl. Fehler)</option>
+            <option value="2">2 (+ Background Orchestrierung)</option>
+            <option value="3">3 (+ Debug)</option>
+          </select>
+          <button id="saveLogLevelBtn" class="btn-small">Log-Level speichern</button>
+          <span id="logLevelInfo" class="muted"></span>
+        </div>
       </div>
 
       <div class="card">
@@ -250,6 +261,9 @@ function renderDashboardHtml(): string {
       const refreshBtn = $("refreshBtn");
       const scanBtn = $("scanBtn");
       const healthBtn = $("healthBtn");
+      const logLevelSelect = $("logLevelSelect");
+      const saveLogLevelBtn = $("saveLogLevelBtn");
+      const logLevelInfo = $("logLevelInfo");
       const newAccountBtn = $("newAccountBtn");
       const headline = $("headline");
       const meta = $("meta");
@@ -531,6 +545,23 @@ function renderDashboardHtml(): string {
         }
       }
 
+      async function loadRuntimeConfig() {
+        const data = await api("/.netlify/functions/runtime-config", { method: "GET" });
+        const level = Number(data?.config?.logLevel ?? 0);
+        logLevelSelect.value = String(level);
+        logLevelInfo.textContent = "aktuell: " + String(level);
+      }
+
+      async function saveRuntimeConfig() {
+        const selected = Number(logLevelSelect.value);
+        await apiWithDashboardAuth("/.netlify/functions/runtime-config", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ logLevel: selected }),
+        });
+        logLevelInfo.textContent = "gespeichert: " + String(selected);
+      }
+
       configAccountsBody.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
@@ -548,6 +579,7 @@ function renderDashboardHtml(): string {
       refreshBtn.addEventListener("click", () => { void loadStatus(); });
       scanBtn.addEventListener("click", () => { void runScanNow(); });
       healthBtn.addEventListener("click", () => { void runHealthCheckNow(); });
+      saveLogLevelBtn.addEventListener("click", () => { void saveRuntimeConfig(); });
       newAccountBtn.addEventListener("click", () => openModal("new"));
       cancelBtn.addEventListener("click", closeModal);
       saveBtn.addEventListener("click", () => { void saveAccountFromForm(); });
@@ -580,7 +612,7 @@ function renderDashboardHtml(): string {
         if (event.target === authOverlay) authCancelBtn.click();
       });
 
-      Promise.all([loadStatus(), loadConfigAccounts()]).catch((e) => {
+      Promise.all([loadStatus(), loadConfigAccounts(), loadRuntimeConfig()]).catch((e) => {
         console.error(e);
       });
     </script>

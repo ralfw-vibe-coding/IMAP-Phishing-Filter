@@ -12,9 +12,10 @@ import {
 import { ImapflowMailboxProvider, OpenAiPhishingProvider } from "../../packages/providers-node/src/index.js";
 import { buildImapAccountConfigFromEnvShape } from "../../imap.js";
 
-export const NETLIFY_VERSION_DISPLAY = "1.0.0.2";
+export const NETLIFY_VERSION_DISPLAY = "1.0.0.3";
 const DEFAULT_NETLIFY_PROMPT_PATH = "/var/task/phishingdetection_prompt.txt";
 const IMAP_ACCOUNTS_CONFIG_KEY = "config:imap_accounts";
+const RUNTIME_CONFIG_KEY = "config:runtime";
 
 type StoredImapAccount = {
   id: string;
@@ -33,7 +34,15 @@ type RunStatusRecord = {
   owner?: string;
   message?: string;
   processedAccounts?: number;
-  results?: Array<{ accountId: string; processed: number; flagged: number; lastSeenUid: number }>;
+  failedAccounts?: number;
+  results?: Array<{
+    accountId: string;
+    processed: number;
+    flagged: number;
+    lastSeenUid: number | null;
+    status?: "ok" | "error";
+    message?: string;
+  }>;
 };
 
 export type DashboardImapAccount = {
@@ -45,6 +54,10 @@ export type DashboardImapAccount = {
   phishingTreatment: "flag" | "move_to_phishing_folder";
   phishingThreshold?: number;
   hasPassword: boolean;
+};
+
+export type DashboardRuntimeConfig = {
+  logLevel: number;
 };
 
 function asNonEmptyString(
@@ -100,6 +113,12 @@ function nextAccountId(existingIds: string[]): string {
     }
   }
   return formatAccountId(max + 1);
+}
+
+function normalizeLogLevel(value: unknown): number {
+  const asNumber = typeof value === "number" ? value : Number.parseInt(String(value ?? "0"), 10);
+  if (!Number.isFinite(asNumber)) return 0;
+  return Math.max(0, Math.min(3, Math.floor(asNumber)));
 }
 
 let storeSingleton: AtomicKeyValueStore | null = null;
@@ -291,6 +310,18 @@ async function writeStoredAccounts(accounts: StoredImapAccount[]): Promise<void>
   await writeJsonRecord(IMAP_ACCOUNTS_CONFIG_KEY, accounts);
 }
 
+async function loadRuntimeConfig(): Promise<DashboardRuntimeConfig> {
+  const fromStore = await readJsonRecord<{ logLevel?: unknown }>(RUNTIME_CONFIG_KEY);
+  if (fromStore && Object.prototype.hasOwnProperty.call(fromStore, "logLevel")) {
+    return { logLevel: normalizeLogLevel(fromStore.logLevel) };
+  }
+  return { logLevel: normalizeLogLevel(process.env.LOG_LEVEL ?? "0") };
+}
+
+async function writeRuntimeConfig(config: DashboardRuntimeConfig): Promise<void> {
+  await writeJsonRecord(RUNTIME_CONFIG_KEY, { logLevel: normalizeLogLevel(config.logLevel) });
+}
+
 async function createRuntime() {
   const store = getStore();
   const lease = new AtomicLeaseProvider(store);
@@ -308,8 +339,8 @@ async function createRuntime() {
     60,
     Number.parseInt(process.env.SCAN_LEASE_TTL_SECONDS ?? "900", 10) || 900,
   );
-  const logLevelRaw = Number.parseInt(process.env.LOG_LEVEL ?? "0", 10);
-  const logLevel = Number.isFinite(logLevelRaw) ? Math.max(0, Math.min(3, logLevelRaw)) : 0;
+  const runtimeConfig = await loadRuntimeConfig();
+  const logLevel = runtimeConfig.logLevel;
 
   return {
     lease,
@@ -321,6 +352,7 @@ async function createRuntime() {
     maxMessagesPerTick,
     leaseTtlSeconds,
     logLevel,
+    runtimeConfig,
   };
 }
 
@@ -358,9 +390,6 @@ function createLogger(logLevel: number, accountLabel: string): ScanLogger {
       }
     },
     error: (message, extra) => {
-      if (logLevel < 1) {
-        return;
-      }
       if (extra) {
         // eslint-disable-next-line no-console
         console.error(`[scan][${accountLabel}] ${message}`, extra);
@@ -390,7 +419,15 @@ export async function triggerBackgroundScan(baseUrl: string): Promise<void> {
 
 export async function runBackgroundScan(): Promise<
   | { status: "busy" }
-  | { status: "ok"; processedAccounts: number; results: Array<{ accountId: string; result: ScanResult }> }
+  | {
+    status: "ok";
+    processedAccounts: number;
+    failedAccounts: number;
+    results: Array<
+      | { accountId: string; status: "ok"; result: ScanResult }
+      | { accountId: string; status: "error"; message: string; lastSeenUid: number | null }
+    >;
+  }
 > {
   const runtime = await createRuntime();
   const leaseKey = "netlify:phishing-scan:global";
@@ -413,7 +450,10 @@ export async function runBackgroundScan(): Promise<
     owner,
     ttlSeconds: runtime.leaseTtlSeconds,
     task: async () => {
-      const results: Array<{ accountId: string; result: ScanResult }> = [];
+      const results: Array<
+        | { accountId: string; status: "ok"; result: ScanResult }
+        | { accountId: string; status: "error"; message: string; lastSeenUid: number | null }
+      > = [];
       for (const account of runtime.accounts) {
         const renewed = await runtime.lease.renewLease(leaseKey, owner, runtime.leaseTtlSeconds);
         if (!renewed && runtime.logLevel >= 3) {
@@ -451,16 +491,36 @@ export async function runBackgroundScan(): Promise<
           };
         }
 
-        const result = await runScan(request, deps);
-        results.push({ accountId: account.id, result });
-        if (runtime.logLevel >= 2) {
+        try {
+          const result = await runScan(request, deps);
+          results.push({ accountId: account.id, status: "ok", result });
+          if (runtime.logLevel >= 2) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[bg] done account=${account.id} processed=${result.processed} flagged=${result.flagged} lastSeenUid=${result.lastSeenUid}`,
+            );
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const lastSeenUid = await runtime.state.getLastSeenUid(account.id);
+          results.push({
+            accountId: account.id,
+            status: "error",
+            message,
+            lastSeenUid,
+          });
+          // Always log hard account failures, regardless of LOG_LEVEL.
           // eslint-disable-next-line no-console
-          console.log(
-            `[bg] done account=${account.id} processed=${result.processed} flagged=${result.flagged} lastSeenUid=${result.lastSeenUid}`,
-          );
+          console.error(`[bg] account_error account=${account.id} message=${message}`);
         }
       }
-      return { status: "ok" as const, processedAccounts: runtime.accounts.length, results };
+      const failedAccounts = results.filter((r) => r.status === "error").length;
+      return {
+        status: "ok" as const,
+        processedAccounts: runtime.accounts.length,
+        failedAccounts,
+        results,
+      };
     },
     }).then(async (res) => {
       if (res.status === "busy") {
@@ -480,16 +540,28 @@ export async function runBackgroundScan(): Promise<
         // eslint-disable-next-line no-console
         console.log(`[bg] finished owner=${owner} processedAccounts=${res.value.processedAccounts}`);
       }
+      if (res.value.failedAccounts > 0) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[bg] finished_with_errors owner=${owner} failedAccounts=${res.value.failedAccounts}`,
+        );
+      }
       await writeJsonRecord("scan:status", {
         updatedAtUnixMs: Date.now(),
         status: "ok",
         owner,
+        ...(res.value.failedAccounts > 0
+          ? { message: `${res.value.failedAccounts} account(s) failed in last run` }
+          : {}),
         processedAccounts: res.value.processedAccounts,
+        failedAccounts: res.value.failedAccounts,
         results: res.value.results.map((r) => ({
           accountId: r.accountId,
-          processed: r.result.processed,
-          flagged: r.result.flagged,
-          lastSeenUid: r.result.lastSeenUid,
+          processed: r.status === "ok" ? r.result.processed : 0,
+          flagged: r.status === "ok" ? r.result.flagged : 0,
+          lastSeenUid: r.status === "ok" ? r.result.lastSeenUid : r.lastSeenUid,
+          status: r.status,
+          ...(r.status === "error" ? { message: r.message } : {}),
         })),
       } satisfies RunStatusRecord);
       return res.value;
@@ -543,6 +615,18 @@ export async function getScanStatus(): Promise<{
     status,
     accounts,
   };
+}
+
+export async function getDashboardRuntimeConfig(): Promise<DashboardRuntimeConfig> {
+  return loadRuntimeConfig();
+}
+
+export async function setDashboardRuntimeConfig(input: Partial<DashboardRuntimeConfig>): Promise<DashboardRuntimeConfig> {
+  const next = {
+    logLevel: normalizeLogLevel(input.logLevel ?? 0),
+  };
+  await writeRuntimeConfig(next);
+  return next;
 }
 
 export async function listDashboardAccounts(): Promise<DashboardImapAccount[]> {
