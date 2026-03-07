@@ -85,6 +85,23 @@ function asOptionalTreatment(
   );
 }
 
+function formatAccountId(n: number): string {
+  return `acc-${String(Math.max(1, Math.floor(n))).padStart(2, "0")}`;
+}
+
+function nextAccountId(existingIds: string[]): string {
+  let max = 0;
+  for (const id of existingIds) {
+    const m = /^acc-(\d+)$/i.exec(id.trim());
+    if (!m) continue;
+    const n = Number.parseInt(m[1] ?? "", 10);
+    if (Number.isFinite(n) && n > max) {
+      max = n;
+    }
+  }
+  return formatAccountId(max + 1);
+}
+
 let storeSingleton: AtomicKeyValueStore | null = null;
 let storeKindSingleton: "upstash" | "file" | "memory" | null = null;
 
@@ -145,7 +162,7 @@ async function readJsonRecord<T>(key: string): Promise<T | null> {
 
 function normalizeStoredAccounts(
   parsedUnknown: unknown,
-  opts: { source: string; allowEmpty: boolean },
+  opts: { source: string; allowEmpty: boolean; missingIdMode: "auto_from_index" | "empty" },
 ): StoredImapAccount[] {
   if (!Array.isArray(parsedUnknown)) {
     throw new Error(`Invalid ${opts.source}: root value must be an array`);
@@ -187,11 +204,15 @@ function normalizeStoredAccounts(
       password,
       folder,
     });
-    const id = explicitId ?? `${base.user}@${base.host}:${base.port}|${base.folder}|${idx}`;
-    if (usedIds.has(id)) {
+    const id = explicitId ?? (
+      opts.missingIdMode === "auto_from_index"
+        ? formatAccountId(idx + 1)
+        : ""
+    );
+    if (id && usedIds.has(id)) {
       throw new Error(`Invalid ${opts.source}: duplicate account id "${id}"`);
     }
-    usedIds.add(id);
+    if (id) usedIds.add(id);
 
     return {
       id,
@@ -219,7 +240,11 @@ function parseAccountsFromEnvVar(): StoredImapAccount[] {
     throw new Error(`Invalid IMAP_ACCOUNTS: must be valid JSON (${(error as Error).message})`);
   }
 
-  return normalizeStoredAccounts(parsedUnknown, { source: "IMAP_ACCOUNTS", allowEmpty: false });
+  return normalizeStoredAccounts(parsedUnknown, {
+    source: "IMAP_ACCOUNTS",
+    allowEmpty: false,
+    missingIdMode: "auto_from_index",
+  });
 }
 
 function toAccountConfigs(accounts: StoredImapAccount[]): AccountConfig[] {
@@ -250,7 +275,11 @@ function toAccountConfigs(accounts: StoredImapAccount[]): AccountConfig[] {
 async function loadStoredAccounts(): Promise<StoredImapAccount[]> {
   const fromStore = await readJsonRecord<unknown>(IMAP_ACCOUNTS_CONFIG_KEY);
   if (fromStore !== null) {
-    return normalizeStoredAccounts(fromStore, { source: IMAP_ACCOUNTS_CONFIG_KEY, allowEmpty: true });
+    return normalizeStoredAccounts(fromStore, {
+      source: IMAP_ACCOUNTS_CONFIG_KEY,
+      allowEmpty: true,
+      missingIdMode: "auto_from_index",
+    });
   }
 
   const envAccounts = parseAccountsFromEnvVar();
@@ -531,16 +560,17 @@ export async function listDashboardAccounts(): Promise<DashboardImapAccount[]> {
 }
 
 export async function createDashboardAccount(input: unknown): Promise<DashboardImapAccount> {
+  const current = await loadStoredAccounts();
   const normalized = normalizeStoredAccounts([input], {
     source: "dashboard.create",
     allowEmpty: false,
+    missingIdMode: "empty",
   })[0];
   if (!normalized) throw new Error("Invalid account payload");
   const account: StoredImapAccount = normalized.id.trim().length > 0
     ? normalized
-    : { ...normalized, id: `acc_${Date.now()}_${Math.random().toString(16).slice(2, 8)}` };
+    : { ...normalized, id: nextAccountId(current.map((acc) => acc.id)) };
 
-  const current = await loadStoredAccounts();
   if (current.some((acc) => acc.id === account.id)) {
     throw new Error(`Account id already exists: ${account.id}`);
   }
@@ -564,6 +594,7 @@ export async function updateDashboardAccount(accountId: string, input: unknown):
   const normalized = normalizeStoredAccounts([input], {
     source: "dashboard.update",
     allowEmpty: false,
+    missingIdMode: "empty",
   })[0];
   if (!normalized) throw new Error("Invalid account payload");
   const updated: StoredImapAccount = { ...normalized, id };
