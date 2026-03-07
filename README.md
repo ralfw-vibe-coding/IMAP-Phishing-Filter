@@ -95,6 +95,7 @@ Dieser Abschnitt beschreibt den Cloud-Betrieb über Netlify Functions:
 - `scan-status`: gibt Status/Version/letzte Ergebnisse zurück.
 - `health-check`: läuft 1x täglich und sendet eine Service-Status-E-Mail.
 - `dashboard`: einfache Web-Seite für Status + manuellen Scan-Start.
+- `accounts-config`: API für Kontoverwaltung im Dashboard (Redis-basiert).
 
 ### 1) Netlify Site verbinden
 
@@ -215,6 +216,11 @@ Auf der Seite:
 - aktueller `scan-status`
 - Account-Übersicht (`lastSeenUid`)
 - Button zum Start von `scan-background`
+- IMAP-Konten verwalten: `Neu`, `Bearbeiten`, `Löschen` (Passwort wird nicht angezeigt)
+
+Wichtig:
+- Die IMAP-Konten für Netlify-Scans kommen aus Redis (`config:imap_accounts`).
+- Beim ersten Start werden sie einmalig aus `IMAP_ACCOUNTS` übernommen (Bootstrap).
 
 ### 5) Logs verstehen
 

@@ -14,9 +14,10 @@ import { buildImapAccountConfigFromEnvShape } from "../../imap.js";
 
 export const NETLIFY_VERSION_DISPLAY = "1.0.0.2";
 const DEFAULT_NETLIFY_PROMPT_PATH = "/var/task/phishingdetection_prompt.txt";
+const IMAP_ACCOUNTS_CONFIG_KEY = "config:imap_accounts";
 
-type EnvAccountShape = {
-  id?: string;
+type StoredImapAccount = {
+  id: string;
   label: string;
   server: string;
   user: string;
@@ -33,6 +34,17 @@ type RunStatusRecord = {
   message?: string;
   processedAccounts?: number;
   results?: Array<{ accountId: string; processed: number; flagged: number; lastSeenUid: number }>;
+};
+
+export type DashboardImapAccount = {
+  id: string;
+  label: string;
+  server: string;
+  user: string;
+  folder: string;
+  phishingTreatment: "flag" | "move_to_phishing_folder";
+  phishingThreshold?: number;
+  hasPassword: boolean;
 };
 
 function asNonEmptyString(
@@ -131,53 +143,41 @@ async function readJsonRecord<T>(key: string): Promise<T | null> {
   }
 }
 
-function parseAccounts(): AccountConfig[] {
-  const raw = process.env.IMAP_ACCOUNTS;
-  if (!raw) {
-    throw new Error("Missing IMAP_ACCOUNTS environment variable");
-  }
-
-  let parsedUnknown: unknown;
-  try {
-    parsedUnknown = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(
-      `Invalid IMAP_ACCOUNTS: must be valid JSON (${(error as Error).message})`,
-    );
-  }
-
+function normalizeStoredAccounts(
+  parsedUnknown: unknown,
+  opts: { source: string; allowEmpty: boolean },
+): StoredImapAccount[] {
   if (!Array.isArray(parsedUnknown)) {
-    throw new Error("Invalid IMAP_ACCOUNTS: root value must be an array");
+    throw new Error(`Invalid ${opts.source}: root value must be an array`);
+  }
+  if (!opts.allowEmpty && parsedUnknown.length === 0) {
+    throw new Error(`Invalid ${opts.source}: at least one account is required`);
   }
 
-  if (parsedUnknown.length === 0) {
-    throw new Error("Invalid IMAP_ACCOUNTS: at least one account is required");
-  }
-
-  const parsed = parsedUnknown as EnvAccountShape[];
   const usedIds = new Set<string>();
 
-  return parsed.map((acc, idx) => {
+  return parsedUnknown.map((acc, idx) => {
     if (!acc || typeof acc !== "object") {
-      throw new Error(`Invalid IMAP_ACCOUNTS: account[${idx}] must be an object`);
+      throw new Error(`Invalid ${opts.source}: account[${idx}] must be an object`);
     }
 
-    const label = asNonEmptyString(acc.label, `account[${idx}].label`);
-    const server = asNonEmptyString(acc.server, `account[${idx}].server`);
-    const user = asNonEmptyString(acc.user, `account[${idx}].user`);
-    const password = asNonEmptyString(acc.password, `account[${idx}].password`);
-    const folder = asNonEmptyString(acc.folder, `account[${idx}].folder`);
-    const explicitId = asOptionalString(acc.id, `account[${idx}].id`);
+    const shape = acc as Partial<StoredImapAccount>;
+    const label = asNonEmptyString(shape.label, `account[${idx}].label`);
+    const server = asNonEmptyString(shape.server, `account[${idx}].server`);
+    const user = asNonEmptyString(shape.user, `account[${idx}].user`);
+    const password = asNonEmptyString(shape.password, `account[${idx}].password`);
+    const folder = asNonEmptyString(shape.folder, `account[${idx}].folder`);
+    const explicitId = asOptionalString(shape.id, `account[${idx}].id`);
     const phishingTreatment = asOptionalTreatment(
-      acc.phishingTreatment,
+      shape.phishingTreatment,
       `account[${idx}].phishingTreatment`,
     );
     const phishingThreshold = asOptionalNumber(
-      acc.phishingThreshold,
+      shape.phishingThreshold,
       `account[${idx}].phishingThreshold`,
     );
     if (phishingThreshold !== undefined && (phishingThreshold < 0 || phishingThreshold > 1)) {
-      throw new Error(`Invalid IMAP_ACCOUNTS: account[${idx}].phishingThreshold must be 0..1`);
+      throw new Error(`Invalid ${opts.source}: account[${idx}].phishingThreshold must be 0..1`);
     }
 
     const base = buildImapAccountConfigFromEnvShape({
@@ -187,15 +187,53 @@ function parseAccounts(): AccountConfig[] {
       password,
       folder,
     });
-
     const id = explicitId ?? `${base.user}@${base.host}:${base.port}|${base.folder}|${idx}`;
     if (usedIds.has(id)) {
-      throw new Error(`Invalid IMAP_ACCOUNTS: duplicate account id "${id}"`);
+      throw new Error(`Invalid ${opts.source}: duplicate account id "${id}"`);
     }
     usedIds.add(id);
 
     return {
       id,
+      label,
+      server,
+      user,
+      password,
+      folder,
+      phishingTreatment: phishingTreatment ?? "flag",
+      ...(typeof phishingThreshold === "number" ? { phishingThreshold } : {}),
+    };
+  });
+}
+
+function parseAccountsFromEnvVar(): StoredImapAccount[] {
+  const raw = process.env.IMAP_ACCOUNTS;
+  if (!raw) {
+    throw new Error("Missing IMAP_ACCOUNTS environment variable");
+  }
+
+  let parsedUnknown: unknown;
+  try {
+    parsedUnknown = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid IMAP_ACCOUNTS: must be valid JSON (${(error as Error).message})`);
+  }
+
+  return normalizeStoredAccounts(parsedUnknown, { source: "IMAP_ACCOUNTS", allowEmpty: false });
+}
+
+function toAccountConfigs(accounts: StoredImapAccount[]): AccountConfig[] {
+  return accounts.map((acc) => {
+    const base = buildImapAccountConfigFromEnvShape({
+      label: acc.label,
+      server: acc.server,
+      user: acc.user,
+      password: acc.password,
+      folder: acc.folder,
+    });
+
+    return {
+      id: acc.id,
       label: base.label,
       host: base.host,
       port: base.port,
@@ -203,20 +241,36 @@ function parseAccounts(): AccountConfig[] {
       user: base.user,
       password: base.password,
       folder: base.folder,
-      phishingTreatment: phishingTreatment ?? "flag",
-      ...(typeof phishingThreshold === "number" ? { phishingThreshold } : {}),
+      phishingTreatment: acc.phishingTreatment ?? "flag",
+      ...(typeof acc.phishingThreshold === "number" ? { phishingThreshold: acc.phishingThreshold } : {}),
     };
   });
 }
 
-function createRuntime() {
+async function loadStoredAccounts(): Promise<StoredImapAccount[]> {
+  const fromStore = await readJsonRecord<unknown>(IMAP_ACCOUNTS_CONFIG_KEY);
+  if (fromStore !== null) {
+    return normalizeStoredAccounts(fromStore, { source: IMAP_ACCOUNTS_CONFIG_KEY, allowEmpty: true });
+  }
+
+  const envAccounts = parseAccountsFromEnvVar();
+  await writeJsonRecord(IMAP_ACCOUNTS_CONFIG_KEY, envAccounts);
+  return envAccounts;
+}
+
+async function writeStoredAccounts(accounts: StoredImapAccount[]): Promise<void> {
+  await writeJsonRecord(IMAP_ACCOUNTS_CONFIG_KEY, accounts);
+}
+
+async function createRuntime() {
   const store = getStore();
   const lease = new AtomicLeaseProvider(store);
   const mailbox = new ImapflowMailboxProvider();
   const promptPath = process.env.PHISHING_PROMPT_PATH?.trim() || DEFAULT_NETLIFY_PROMPT_PATH;
   const ai = new OpenAiPhishingProvider({ promptPath });
   const state = new KvStateProvider(store, "state:lastSeen");
-  const accounts = parseAccounts();
+  const storedAccounts = await loadStoredAccounts();
+  const accounts = toAccountConfigs(storedAccounts);
   const maxMessagesPerTick = Math.max(
     1,
     Number.parseInt(process.env.SCAN_MAX_MESSAGES_PER_TICK ?? "25", 10) || 25,
@@ -228,7 +282,17 @@ function createRuntime() {
   const logLevelRaw = Number.parseInt(process.env.LOG_LEVEL ?? "0", 10);
   const logLevel = Number.isFinite(logLevelRaw) ? Math.max(0, Math.min(3, logLevelRaw)) : 0;
 
-  return { lease, mailbox, ai, state, accounts, maxMessagesPerTick, leaseTtlSeconds, logLevel };
+  return {
+    lease,
+    mailbox,
+    ai,
+    state,
+    accounts,
+    storedAccounts,
+    maxMessagesPerTick,
+    leaseTtlSeconds,
+    logLevel,
+  };
 }
 
 function createLogger(logLevel: number, accountLabel: string): ScanLogger {
@@ -299,7 +363,7 @@ export async function runBackgroundScan(): Promise<
   | { status: "busy" }
   | { status: "ok"; processedAccounts: number; results: Array<{ accountId: string; result: ScanResult }> }
 > {
-  const runtime = createRuntime();
+  const runtime = await createRuntime();
   const leaseKey = "netlify:phishing-scan:global";
   const owner = `run_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
@@ -414,7 +478,7 @@ export async function runBackgroundScan(): Promise<
 }
 
 export async function isBackgroundBusy(): Promise<boolean> {
-  const runtime = createRuntime();
+  const runtime = await createRuntime();
   return runtime.lease.isLeaseActive("netlify:phishing-scan:global");
 }
 
@@ -427,7 +491,7 @@ export async function getScanStatus(): Promise<{
   status: RunStatusRecord | null;
   accounts: Array<{ accountId: string; label: string; lastSeenUid: number | null }>;
 }> {
-  const runtime = createRuntime();
+  const runtime = await createRuntime();
   const busy = await runtime.lease.isLeaseActive("netlify:phishing-scan:global");
   const status = await readJsonRecord<RunStatusRecord>("scan:status");
 
@@ -450,6 +514,88 @@ export async function getScanStatus(): Promise<{
     status,
     accounts,
   };
+}
+
+export async function listDashboardAccounts(): Promise<DashboardImapAccount[]> {
+  const accounts = await loadStoredAccounts();
+  return accounts.map((acc) => ({
+    id: acc.id,
+    label: acc.label,
+    server: acc.server,
+    user: acc.user,
+    folder: acc.folder,
+    phishingTreatment: acc.phishingTreatment ?? "flag",
+    ...(typeof acc.phishingThreshold === "number" ? { phishingThreshold: acc.phishingThreshold } : {}),
+    hasPassword: Boolean(acc.password),
+  }));
+}
+
+export async function createDashboardAccount(input: unknown): Promise<DashboardImapAccount> {
+  const normalized = normalizeStoredAccounts([input], {
+    source: "dashboard.create",
+    allowEmpty: false,
+  })[0];
+  if (!normalized) throw new Error("Invalid account payload");
+  const account: StoredImapAccount = normalized.id.trim().length > 0
+    ? normalized
+    : { ...normalized, id: `acc_${Date.now()}_${Math.random().toString(16).slice(2, 8)}` };
+
+  const current = await loadStoredAccounts();
+  if (current.some((acc) => acc.id === account.id)) {
+    throw new Error(`Account id already exists: ${account.id}`);
+  }
+  current.push(account);
+  await writeStoredAccounts(current);
+
+  return {
+    id: account.id,
+    label: account.label,
+    server: account.server,
+    user: account.user,
+    folder: account.folder,
+    phishingTreatment: account.phishingTreatment ?? "flag",
+    ...(typeof account.phishingThreshold === "number" ? { phishingThreshold: account.phishingThreshold } : {}),
+    hasPassword: Boolean(account.password),
+  };
+}
+
+export async function updateDashboardAccount(accountId: string, input: unknown): Promise<DashboardImapAccount> {
+  const id = asNonEmptyString(accountId, "accountId");
+  const normalized = normalizeStoredAccounts([input], {
+    source: "dashboard.update",
+    allowEmpty: false,
+  })[0];
+  if (!normalized) throw new Error("Invalid account payload");
+  const updated: StoredImapAccount = { ...normalized, id };
+
+  const current = await loadStoredAccounts();
+  const index = current.findIndex((acc) => acc.id === id);
+  if (index < 0) {
+    throw new Error(`Account not found: ${id}`);
+  }
+  current[index] = updated;
+  await writeStoredAccounts(current);
+
+  return {
+    id: updated.id,
+    label: updated.label,
+    server: updated.server,
+    user: updated.user,
+    folder: updated.folder,
+    phishingTreatment: updated.phishingTreatment ?? "flag",
+    ...(typeof updated.phishingThreshold === "number" ? { phishingThreshold: updated.phishingThreshold } : {}),
+    hasPassword: Boolean(updated.password),
+  };
+}
+
+export async function deleteDashboardAccount(accountId: string): Promise<void> {
+  const id = asNonEmptyString(accountId, "accountId");
+  const current = await loadStoredAccounts();
+  const next = current.filter((acc) => acc.id !== id);
+  if (next.length === current.length) {
+    throw new Error(`Account not found: ${id}`);
+  }
+  await writeStoredAccounts(next);
 }
 
 export async function setHealthAlertArmed(armed: boolean): Promise<void> {

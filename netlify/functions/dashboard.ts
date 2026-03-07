@@ -27,7 +27,7 @@ function renderDashboardHtml(): string {
         color: var(--text);
       }
       .wrap {
-        max-width: 900px;
+        max-width: 980px;
         margin: 24px auto;
         padding: 0 16px;
       }
@@ -42,9 +42,7 @@ function renderDashboardHtml(): string {
         margin: 0 0 8px;
         font-size: 24px;
       }
-      .muted {
-        color: var(--muted);
-      }
+      .muted { color: var(--muted); }
       .row {
         display: flex;
         gap: 10px;
@@ -63,6 +61,12 @@ function renderDashboardHtml(): string {
         opacity: 0.6;
         cursor: not-allowed;
       }
+      .btn-small {
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+      .btn-edit { background: #0b63c9; }
+      .btn-delete { background: #b42318; }
       pre {
         background: #0f1720;
         color: #d8e6f4;
@@ -82,6 +86,45 @@ function renderDashboardHtml(): string {
         border-bottom: 1px solid var(--line);
         padding: 8px 6px;
         font-size: 14px;
+        vertical-align: middle;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(10, 18, 31, 0.45);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+      }
+      .overlay.open { display: flex; }
+      .modal {
+        width: 100%;
+        max-width: 560px;
+        background: #fff;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        padding: 16px;
+      }
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .form-grid .full { grid-column: span 2; }
+      label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 4px;
+        color: #334155;
+      }
+      input, select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 9px 10px;
+        border: 1px solid #c9d5e3;
+        border-radius: 8px;
+        font-size: 14px;
       }
     </style>
   </head>
@@ -89,7 +132,7 @@ function renderDashboardHtml(): string {
     <div class="wrap">
       <div class="card">
         <h1>PhishingKiller Dashboard</h1>
-        <div class="muted">Liest <code>scan-status</code> und kann <code>scan-background</code> starten.</div>
+        <div class="muted">Status prüfen, Scan starten und IMAP-Konten verwalten.</div>
       </div>
 
       <div class="card">
@@ -107,7 +150,26 @@ function renderDashboardHtml(): string {
       </div>
 
       <div class="card">
-        <h3>Accounts</h3>
+        <div class="row" style="justify-content: space-between; margin-bottom: 8px;">
+          <h3 style="margin: 0;">IMAP Konten</h3>
+          <button id="newAccountBtn">Neu</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Server</th>
+              <th>Username</th>
+              <th>Folder</th>
+              <th>Aktion</th>
+            </tr>
+          </thead>
+          <tbody id="configAccountsBody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h3>Scan-Accounts (Status)</h3>
         <table>
           <thead>
             <tr>
@@ -116,7 +178,7 @@ function renderDashboardHtml(): string {
               <th>lastSeenUid</th>
             </tr>
           </thead>
-          <tbody id="accountsBody"></tbody>
+          <tbody id="statusAccountsBody"></tbody>
         </table>
       </div>
 
@@ -126,15 +188,74 @@ function renderDashboardHtml(): string {
       </div>
     </div>
 
+    <div id="overlay" class="overlay">
+      <div class="modal">
+        <h3 id="modalTitle" style="margin-top: 0;">Konto</h3>
+        <div class="form-grid">
+          <div class="full">
+            <label for="fLabel">Label</label>
+            <input id="fLabel" />
+          </div>
+          <div class="full">
+            <label for="fServer">Server (z. B. imaps://mail.example.com:993)</label>
+            <input id="fServer" />
+          </div>
+          <div>
+            <label for="fUser">Username</label>
+            <input id="fUser" />
+          </div>
+          <div>
+            <label for="fPassword">Password</label>
+            <input id="fPassword" type="password" />
+          </div>
+          <div>
+            <label for="fFolder">Folder</label>
+            <input id="fFolder" value="INBOX" />
+          </div>
+          <div>
+            <label for="fTreatment">Phishing Treatment</label>
+            <select id="fTreatment">
+              <option value="flag">flag</option>
+              <option value="move_to_phishing_folder">move_to_phishing_folder</option>
+            </select>
+          </div>
+          <div class="full">
+            <label for="fThreshold">Phishing Threshold (0..1, optional)</label>
+            <input id="fThreshold" placeholder="0.5" />
+          </div>
+        </div>
+        <div class="row" style="margin-top: 14px; justify-content: flex-end;">
+          <button id="cancelBtn" class="btn-small" style="background:#64748b;">Abbrechen</button>
+          <button id="saveBtn" class="btn-small">Speichern</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       const $ = (id) => document.getElementById(id);
       const refreshBtn = $("refreshBtn");
       const scanBtn = $("scanBtn");
+      const newAccountBtn = $("newAccountBtn");
       const headline = $("headline");
       const meta = $("meta");
       const statusLine = $("statusLine");
-      const accountsBody = $("accountsBody");
+      const statusAccountsBody = $("statusAccountsBody");
+      const configAccountsBody = $("configAccountsBody");
       const raw = $("raw");
+      const overlay = $("overlay");
+      const modalTitle = $("modalTitle");
+      const fLabel = $("fLabel");
+      const fServer = $("fServer");
+      const fUser = $("fUser");
+      const fPassword = $("fPassword");
+      const fFolder = $("fFolder");
+      const fTreatment = $("fTreatment");
+      const fThreshold = $("fThreshold");
+      const cancelBtn = $("cancelBtn");
+      const saveBtn = $("saveBtn");
+
+      let currentEditId = null;
+      let configAccounts = [];
 
       function esc(value) {
         return String(value ?? "")
@@ -152,12 +273,110 @@ function renderDashboardHtml(): string {
         return "muted";
       }
 
+      async function api(path, init) {
+        const res = await fetch(path, init);
+        let data = {};
+        try {
+          data = await res.json();
+        } catch {}
+        if (!res.ok) {
+          throw new Error((data && data.message) ? data.message : ("HTTP " + res.status));
+        }
+        return data;
+      }
+
+      function openModal(mode, account) {
+        currentEditId = mode === "edit" ? account.id : null;
+        modalTitle.textContent = mode === "edit" ? "Konto bearbeiten" : "Neues Konto";
+        fLabel.value = account?.label ?? "";
+        fServer.value = account?.server ?? "";
+        fUser.value = account?.user ?? "";
+        fPassword.value = "";
+        fFolder.value = account?.folder ?? "INBOX";
+        fTreatment.value = account?.phishingTreatment ?? "flag";
+        fThreshold.value = account?.phishingThreshold ?? "";
+        overlay.classList.add("open");
+      }
+
+      function closeModal() {
+        overlay.classList.remove("open");
+        currentEditId = null;
+      }
+
+      function renderConfigAccounts() {
+        configAccountsBody.innerHTML = "";
+        for (const acc of configAccounts) {
+          const tr = document.createElement("tr");
+          tr.innerHTML =
+            "<td>" + esc(acc.label) + "</td>" +
+            "<td>" + esc(acc.server) + "</td>" +
+            "<td>" + esc(acc.user) + "</td>" +
+            "<td>" + esc(acc.folder) + "</td>" +
+            "<td>" +
+              '<button data-edit="' + esc(acc.id) + '" class="btn-small btn-edit">Bearbeiten</button> ' +
+              '<button data-del="' + esc(acc.id) + '" class="btn-small btn-delete">Löschen</button>' +
+            "</td>";
+          configAccountsBody.appendChild(tr);
+        }
+      }
+
+      async function loadConfigAccounts() {
+        const data = await api("/.netlify/functions/accounts-config", { method: "GET" });
+        configAccounts = data.accounts ?? [];
+        renderConfigAccounts();
+      }
+
+      async function saveAccountFromForm() {
+        const payload = {
+          label: fLabel.value.trim(),
+          server: fServer.value.trim(),
+          user: fUser.value.trim(),
+          password: fPassword.value.trim(),
+          folder: fFolder.value.trim(),
+          phishingTreatment: fTreatment.value,
+          phishingThreshold: fThreshold.value.trim().length > 0 ? Number(fThreshold.value.trim()) : undefined,
+        };
+
+        if (!payload.label || !payload.server || !payload.user || !payload.password || !payload.folder) {
+          alert("Bitte alle Pflichtfelder ausfüllen (inkl. Password).");
+          return;
+        }
+        if (payload.phishingThreshold !== undefined && !(payload.phishingThreshold >= 0 && payload.phishingThreshold <= 1)) {
+          alert("Phishing Threshold muss zwischen 0 und 1 liegen.");
+          return;
+        }
+
+        if (currentEditId) {
+          await api("/.netlify/functions/accounts-config", {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ accountId: currentEditId, account: payload }),
+          });
+        } else {
+          await api("/.netlify/functions/accounts-config", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ account: payload }),
+          });
+        }
+
+        closeModal();
+        await loadConfigAccounts();
+      }
+
+      async function deleteAccount(accountId) {
+        if (!confirm("Konto wirklich löschen?")) return;
+        await api("/.netlify/functions/accounts-config?accountId=" + encodeURIComponent(accountId), {
+          method: "DELETE",
+        });
+        await loadConfigAccounts();
+      }
+
       async function loadStatus() {
         refreshBtn.disabled = true;
         headline.textContent = "lade status...";
         try {
-          const res = await fetch("/.netlify/functions/scan-status", { method: "GET" });
-          const data = await res.json();
+          const data = await api("/.netlify/functions/scan-status", { method: "GET" });
           const runStatus = data.status?.status ?? "none";
 
           headline.innerHTML = 'Status: <span class="' + classFor(runStatus) + '">' + esc(runStatus) + "</span>";
@@ -173,14 +392,14 @@ function renderDashboardHtml(): string {
                 (data.status.message ? " | " + data.status.message : "")
               : "Noch kein Laufstatus vorhanden";
 
-          accountsBody.innerHTML = "";
+          statusAccountsBody.innerHTML = "";
           for (const acc of data.accounts ?? []) {
             const tr = document.createElement("tr");
             tr.innerHTML =
               "<td>" + esc(acc.accountId) + "</td>" +
               "<td>" + esc(acc.label) + "</td>" +
               "<td>" + esc(acc.lastSeenUid ?? "null") + "</td>";
-            accountsBody.appendChild(tr);
+            statusAccountsBody.appendChild(tr);
           }
 
           raw.textContent = JSON.stringify(data, null, 2);
@@ -212,9 +431,32 @@ function renderDashboardHtml(): string {
         }
       }
 
-      refreshBtn.addEventListener("click", loadStatus);
-      scanBtn.addEventListener("click", runScanNow);
-      loadStatus();
+      configAccountsBody.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const editId = target.getAttribute("data-edit");
+        const delId = target.getAttribute("data-del");
+        if (editId) {
+          const found = configAccounts.find((acc) => acc.id === editId);
+          if (found) openModal("edit", found);
+        }
+        if (delId) {
+          void deleteAccount(delId);
+        }
+      });
+
+      refreshBtn.addEventListener("click", () => { void loadStatus(); });
+      scanBtn.addEventListener("click", () => { void runScanNow(); });
+      newAccountBtn.addEventListener("click", () => openModal("new"));
+      cancelBtn.addEventListener("click", closeModal);
+      saveBtn.addEventListener("click", () => { void saveAccountFromForm(); });
+      overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) closeModal();
+      });
+
+      Promise.all([loadStatus(), loadConfigAccounts()]).catch((e) => {
+        console.error(e);
+      });
     </script>
   </body>
 </html>`;
