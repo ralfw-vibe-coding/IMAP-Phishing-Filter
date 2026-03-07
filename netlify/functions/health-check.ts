@@ -4,8 +4,8 @@ type HandlerResponse = { statusCode: number; body: string; headers?: Record<stri
 type Handler = () => Promise<HandlerResponse>;
 
 export const config = {
-  // every 8 hours (at minute 0)
-  schedule: "0 */8 * * *",
+  // once per day at 00:00 UTC
+  schedule: "0 0 * * *",
 };
 
 export const handler: Handler = async () => {

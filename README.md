@@ -93,6 +93,7 @@ Dieser Abschnitt beschreibt den Cloud-Betrieb über Netlify Functions:
 - `scheduled-scan`: läuft jede Minute und stößt einen Lauf an.
 - `scan-background`: führt den eigentlichen IMAP+KI-Scan aus.
 - `scan-status`: gibt Status/Version/letzte Ergebnisse zurück.
+- `health-check`: läuft 1x täglich und sendet eine Service-Status-E-Mail.
 
 ### 1) Netlify Site verbinden
 
@@ -105,6 +106,7 @@ Im Netlify UI:
 Hinweis:
 - Der Scheduler ist in `netlify/netlify.toml` konfiguriert:
   - `schedule = "* * * * *"` (jede 60 Sekunden)
+  - `health-check` mit `schedule = "0 0 * * *"` (1x täglich, 00:00 UTC)
 
 ### 2) Upstash Redis einrichten (für gemeinsamen Zustand)
 
@@ -213,6 +215,38 @@ Bei Netlify im Bereich `Functions`:
 - `0`: minimal (Start, geprüfte Mails, PHISHING-Gründe, Ende)
 - `1`: zusätzlich Orchestrierungs-Logs
 - `2`: zusätzlich Debug-Details
+
+### 6) Health-Check E-Mail mit Resend
+
+Der Health-Check schickt aktuell **bei jedem täglichen Lauf** eine E-Mail (Info-Modus).
+
+#### Resend einrichten
+
+1. Bei Resend anmelden und Domain hinzufügen.
+2. Domain bei deinem DNS-Anbieter verifizieren (SPF/DKIM laut Resend-Anleitung).
+3. In Resend einen API Key erzeugen.
+4. In Netlify Environment Variables setzen:
+   - `RESEND_API_KEY` (der Key aus Resend)
+   - `ALERT_EMAIL_FROM` (z. B. `PhishingKiller <monitor@deinedomain.de>`)
+   - `ALERT_EMAIL_TO` (deine Zieladresse)
+
+Hinweis:
+- Der `FROM`-Absender muss zu einer in Resend verifizierten Domain passen.
+
+#### Health-Check manuell testen
+
+```bash
+BASE="https://<project name>.netlify.app"
+curl -i -X POST "$BASE/.netlify/functions/health-check"
+```
+
+Erwartung:
+- HTTP `200`
+- kurze JSON-Antwort mit `status: "ok"`
+- eine E-Mail im Zielpostfach
+
+Aktuell nicht relevant:
+- `health-rearm` ist bereits vorhanden für einen späteren Modus ("nur bei Down benachrichtigen"), wird aber momentan nicht benötigt.
 
 ## Voraussetzungen für Betrieb
 

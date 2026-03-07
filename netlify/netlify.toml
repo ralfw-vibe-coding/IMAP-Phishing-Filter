@@ -9,4 +9,4 @@
   schedule = "* * * * *"
 
 [functions."health-check"]
-  schedule = "0 */8 * * *"
+  schedule = "0 0 * * *"
