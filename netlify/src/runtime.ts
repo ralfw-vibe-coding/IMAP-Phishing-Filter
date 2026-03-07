@@ -12,7 +12,7 @@ import {
 import { ImapflowMailboxProvider, OpenAiPhishingProvider } from "../../packages/providers-node/src/index.js";
 import { buildImapAccountConfigFromEnvShape } from "../../imap.js";
 
-export const NETLIFY_VERSION_DISPLAY = "1.0.0.1";
+export const NETLIFY_VERSION_DISPLAY = "1.0.0.2";
 const DEFAULT_NETLIFY_PROMPT_PATH = "/var/task/phishingdetection_prompt.txt";
 
 type EnvAccountShape = {
@@ -226,15 +226,21 @@ function createRuntime() {
     Number.parseInt(process.env.SCAN_LEASE_TTL_SECONDS ?? "900", 10) || 900,
   );
   const logLevelRaw = Number.parseInt(process.env.LOG_LEVEL ?? "0", 10);
-  const logLevel = Number.isFinite(logLevelRaw) ? Math.max(0, Math.min(2, logLevelRaw)) : 0;
+  const logLevel = Number.isFinite(logLevelRaw) ? Math.max(0, Math.min(3, logLevelRaw)) : 0;
 
   return { lease, mailbox, ai, state, accounts, maxMessagesPerTick, leaseTtlSeconds, logLevel };
 }
 
 function createLogger(logLevel: number, accountLabel: string): ScanLogger {
+  const isMailSummaryLine = (message: string): boolean => message.trimStart().startsWith("from=");
+  const isPhishingWarnLine = (message: string): boolean => message.includes("PHISHING:");
+
   return {
     info: (message, extra) => {
-      // LOG_LEVEL=0: keep minimal scan logging (start, checked email lines, end).
+      // LOG_LEVEL=0: only per-mail summary lines.
+      if (logLevel === 0 && !isMailSummaryLine(message)) {
+        return;
+      }
       if (logLevel >= 0) {
         if (extra) {
           // eslint-disable-next-line no-console
@@ -246,7 +252,10 @@ function createLogger(logLevel: number, accountLabel: string): ScanLogger {
       }
     },
     warn: (message, extra) => {
-      // keep phishing reasons visible in minimal mode.
+      // LOG_LEVEL=0: keep only phishing warnings.
+      if (logLevel === 0 && !isPhishingWarnLine(message)) {
+        return;
+      }
       if (extra) {
         // eslint-disable-next-line no-console
         console.warn(`[scan][${accountLabel}] ${message}`, extra);
@@ -256,6 +265,9 @@ function createLogger(logLevel: number, accountLabel: string): ScanLogger {
       }
     },
     error: (message, extra) => {
+      if (logLevel < 1) {
+        return;
+      }
       if (extra) {
         // eslint-disable-next-line no-console
         console.error(`[scan][${accountLabel}] ${message}`, extra);
@@ -291,7 +303,7 @@ export async function runBackgroundScan(): Promise<
   const leaseKey = "netlify:phishing-scan:global";
   const owner = `run_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 
-  if (runtime.logLevel >= 1) {
+  if (runtime.logLevel >= 2) {
     // eslint-disable-next-line no-console
     console.log(`[bg] start owner=${owner} accounts=${runtime.accounts.length}`);
   }
@@ -311,11 +323,11 @@ export async function runBackgroundScan(): Promise<
       const results: Array<{ accountId: string; result: ScanResult }> = [];
       for (const account of runtime.accounts) {
         const renewed = await runtime.lease.renewLease(leaseKey, owner, runtime.leaseTtlSeconds);
-        if (!renewed && runtime.logLevel >= 2) {
+        if (!renewed && runtime.logLevel >= 3) {
           // eslint-disable-next-line no-console
           console.warn(`[bg] lease renew failed owner=${owner} account=${account.id}`);
         }
-        if (runtime.logLevel >= 1) {
+        if (runtime.logLevel >= 2) {
           // eslint-disable-next-line no-console
           console.log(`[bg] scanning account=${account.id} mode=since max=${runtime.maxMessagesPerTick}`);
         }
@@ -337,7 +349,7 @@ export async function runBackgroundScan(): Promise<
           state: runtime.state,
           logger: createLogger(runtime.logLevel, account.label),
         };
-        if (runtime.logLevel >= 2) {
+        if (runtime.logLevel >= 3) {
           deps.observer = {
             onProgress: (progress) => {
               // eslint-disable-next-line no-console
@@ -348,7 +360,7 @@ export async function runBackgroundScan(): Promise<
 
         const result = await runScan(request, deps);
         results.push({ accountId: account.id, result });
-        if (runtime.logLevel >= 1) {
+        if (runtime.logLevel >= 2) {
           // eslint-disable-next-line no-console
           console.log(
             `[bg] done account=${account.id} processed=${result.processed} flagged=${result.flagged} lastSeenUid=${result.lastSeenUid}`,
@@ -359,7 +371,7 @@ export async function runBackgroundScan(): Promise<
     },
     }).then(async (res) => {
       if (res.status === "busy") {
-        if (runtime.logLevel >= 1) {
+        if (runtime.logLevel >= 2) {
           // eslint-disable-next-line no-console
           console.log(`[bg] skipped owner=${owner} reason=busy`);
         }
@@ -371,7 +383,7 @@ export async function runBackgroundScan(): Promise<
         } satisfies RunStatusRecord);
         return { status: "busy" as const };
       }
-      if (runtime.logLevel >= 1) {
+      if (runtime.logLevel >= 2) {
         // eslint-disable-next-line no-console
         console.log(`[bg] finished owner=${owner} processedAccounts=${res.value.processedAccounts}`);
       }

@@ -212,9 +212,10 @@ Bei Netlify im Bereich `Functions`:
 - `scan-status`: reine Statusabfragen.
 
 `LOG_LEVEL`:
-- `0`: minimal (Start, geprüfte Mails, PHISHING-Gründe, Ende)
-- `1`: zusätzlich Orchestrierungs-Logs
-- `2`: zusätzlich Debug-Details
+- `0`: nur pro geprüfter Mail `from/to/subject` + PHISHING-Warnungen (wenn keine Mail geprüft wird, bleibt es still)
+- `1`: zusätzlich Scan-Rahmenlogs (`CHECK START`, `CHECK END`, `CHECK ERROR`)
+- `2`: zusätzlich Orchestrierungs-Logs (`[bg] start/scanning/done/finished/skipped`)
+- `3`: zusätzlich Debug-Details (`lease renew failed`, `progress lastSeenUid=...`)
 
 ### 6) Health-Check E-Mail mit Resend
 
