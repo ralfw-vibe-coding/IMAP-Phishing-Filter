@@ -439,3 +439,10 @@ export async function getScanStatus(): Promise<{
     accounts,
   };
 }
+
+export async function setHealthAlertArmed(armed: boolean): Promise<void> {
+  await writeJsonRecord("health:alert_armed", {
+    updatedAtUnixMs: Date.now(),
+    armed,
+  });
+}
