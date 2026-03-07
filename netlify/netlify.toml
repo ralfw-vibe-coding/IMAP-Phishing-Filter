@@ -6,7 +6,12 @@
   included_files = ["../phishingdetection_prompt.txt"]
 
 [functions."scheduled-scan"]
-  schedule = "* * * * *"
+  schedule = "*/2 * * * *"
 
 [functions."health-check"]
   schedule = "0 0 * * *"
+
+[[redirects]]
+  from = "/dashboard"
+  to = "/.netlify/functions/dashboard"
+  status = 200

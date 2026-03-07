@@ -90,10 +90,11 @@ DEST_DIR=/Applications npm run deploy:mac
 ## Netlify Deployment
 
 Dieser Abschnitt beschreibt den Cloud-Betrieb über Netlify Functions:
-- `scheduled-scan`: läuft jede Minute und stößt einen Lauf an.
+- `scheduled-scan`: läuft alle 2 Minuten und stößt einen Lauf an.
 - `scan-background`: führt den eigentlichen IMAP+KI-Scan aus.
 - `scan-status`: gibt Status/Version/letzte Ergebnisse zurück.
 - `health-check`: läuft 1x täglich und sendet eine Service-Status-E-Mail.
+- `dashboard`: einfache Web-Seite für Status + manuellen Scan-Start.
 
 ### 1) Netlify Site verbinden
 
@@ -105,7 +106,7 @@ Im Netlify UI:
 
 Hinweis:
 - Der Scheduler ist in `netlify/netlify.toml` konfiguriert:
-  - `schedule = "* * * * *"` (jede 60 Sekunden)
+  - `schedule = "*/2 * * * *"` (alle 2 Minuten)
   - `health-check` mit `schedule = "0 0 * * *"` (1x täglich, 00:00 UTC)
 
 ### 2) Upstash Redis einrichten (für gemeinsamen Zustand)
@@ -203,6 +204,17 @@ Erwartung:
 - `upstashConfigured` ist `true`
 - `status.status` wird `ok` (oder `busy`, falls ein Lauf bereits aktiv ist)
 - `accounts[].lastSeenUid` enthält Zahlen statt `null`
+
+Dashboard im Browser:
+
+```text
+https://<project name>.netlify.app/dashboard
+```
+
+Auf der Seite:
+- aktueller `scan-status`
+- Account-Übersicht (`lastSeenUid`)
+- Button zum Start von `scan-background`
 
 ### 5) Logs verstehen
 
