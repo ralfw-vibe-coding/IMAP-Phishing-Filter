@@ -94,6 +94,7 @@ Dieser Abschnitt beschreibt den Cloud-Betrieb über Netlify Functions:
 - `scan-background`: führt den eigentlichen IMAP+KI-Scan aus.
 - `scan-status`: gibt Status/Version/letzte Ergebnisse zurück.
 - `health-check`: läuft 1x täglich und sendet eine Service-Status-E-Mail.
+- `health-run`: manueller Health-Check (für Dashboard/Button und Tests).
 - `dashboard`: einfache Web-Seite für Status + manuellen Scan-Start.
 - `accounts-config`: API für Kontoverwaltung im Dashboard (Redis-basiert).
 
@@ -241,7 +242,7 @@ Hinweis:
 
 ```bash
 BASE="https://<project name>.netlify.app"
-curl -i -X POST "$BASE/.netlify/functions/health-check"
+curl -i -X POST "$BASE/.netlify/functions/health-run"
 ```
 
 Erwartung:

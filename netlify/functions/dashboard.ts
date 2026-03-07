@@ -232,6 +232,19 @@ function renderDashboardHtml(): string {
       </div>
     </div>
 
+    <div id="authOverlay" class="overlay">
+      <div class="modal" style="max-width: 420px;">
+        <h3 style="margin-top: 0;">Autorisierung</h3>
+        <div class="muted" style="margin-bottom: 10px;">Passwort für Kontoänderungen eingeben</div>
+        <label for="authPassword">Dashboard Passwort</label>
+        <input id="authPassword" type="password" autocomplete="current-password" />
+        <div class="row" style="margin-top: 14px; justify-content: flex-end;">
+          <button id="authCancelBtn" class="btn-small" style="background:#64748b;">Abbrechen</button>
+          <button id="authConfirmBtn" class="btn-small">Bestätigen</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       const $ = (id) => document.getElementById(id);
       const refreshBtn = $("refreshBtn");
@@ -245,6 +258,7 @@ function renderDashboardHtml(): string {
       const configAccountsBody = $("configAccountsBody");
       const raw = $("raw");
       const overlay = $("overlay");
+      const authOverlay = $("authOverlay");
       const modalTitle = $("modalTitle");
       const fLabel = $("fLabel");
       const fServer = $("fServer");
@@ -255,10 +269,15 @@ function renderDashboardHtml(): string {
       const fThreshold = $("fThreshold");
       const cancelBtn = $("cancelBtn");
       const saveBtn = $("saveBtn");
+      const authPassword = $("authPassword");
+      const authCancelBtn = $("authCancelBtn");
+      const authConfirmBtn = $("authConfirmBtn");
 
       let currentEditId = null;
       let configAccounts = [];
       let dashboardPassword = null;
+      let authPendingResolve = null;
+      let authPendingReject = null;
 
       function esc(value) {
         return String(value ?? "")
@@ -288,9 +307,35 @@ function renderDashboardHtml(): string {
         return data;
       }
 
+      function closeAuthOverlay() {
+        authOverlay.classList.remove("open");
+      }
+
+      function openAuthOverlay() {
+        authPassword.value = "";
+        authOverlay.classList.add("open");
+        setTimeout(() => authPassword.focus(), 0);
+        return new Promise((resolve, reject) => {
+          authPendingResolve = resolve;
+          authPendingReject = reject;
+        });
+      }
+
+      function resolveAuth(value) {
+        if (authPendingResolve) authPendingResolve(value);
+        authPendingResolve = null;
+        authPendingReject = null;
+      }
+
+      function rejectAuth(error) {
+        if (authPendingReject) authPendingReject(error);
+        authPendingResolve = null;
+        authPendingReject = null;
+      }
+
       async function ensureDashboardAuth() {
         if (dashboardPassword) return dashboardPassword;
-        const entered = window.prompt("Dashboard Passwort für Kontoänderungen:");
+        const entered = await openAuthOverlay();
         if (!entered || entered.trim().length === 0) {
           throw new Error("Autorisierung abgebrochen");
         }
@@ -465,10 +510,16 @@ function renderDashboardHtml(): string {
         const old = healthBtn.textContent;
         healthBtn.textContent = "starte...";
         try {
-          const res = await fetch("/.netlify/functions/health-check", { method: "POST" });
+          const res = await fetch("/.netlify/functions/health-run", { method: "POST" });
           if (!res.ok) {
-            const txt = await res.text();
-            throw new Error("HTTP " + res.status + ": " + txt);
+            let msg = "";
+            try {
+              const errData = await res.json();
+              msg = errData?.message ? String(errData.message) : JSON.stringify(errData);
+            } catch {
+              msg = await res.text();
+            }
+            throw new Error("HTTP " + res.status + ": " + msg);
           }
           const data = await res.json().catch(() => ({}));
           alert("Health-Check ausgeführt: " + (data.state ?? "ok"));
@@ -502,6 +553,31 @@ function renderDashboardHtml(): string {
       saveBtn.addEventListener("click", () => { void saveAccountFromForm(); });
       overlay.addEventListener("click", (event) => {
         if (event.target === overlay) closeModal();
+      });
+      authCancelBtn.addEventListener("click", () => {
+        closeAuthOverlay();
+        rejectAuth(new Error("Autorisierung abgebrochen"));
+      });
+      authConfirmBtn.addEventListener("click", () => {
+        const value = authPassword.value.trim();
+        if (!value) {
+          authPassword.focus();
+          return;
+        }
+        closeAuthOverlay();
+        resolveAuth(value);
+      });
+      authPassword.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          authConfirmBtn.click();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          authCancelBtn.click();
+        }
+      });
+      authOverlay.addEventListener("click", (event) => {
+        if (event.target === authOverlay) authCancelBtn.click();
       });
 
       Promise.all([loadStatus(), loadConfigAccounts()]).catch((e) => {
