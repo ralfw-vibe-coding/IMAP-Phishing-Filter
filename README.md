@@ -116,6 +116,13 @@ Warum:
 - Ohne shared Store sehen verschiedene Function-Instanzen nicht denselben Zustand.
 - Für `lastSeenUid`, Lock/Lease und Status ist ein gemeinsamer Store nötig.
 
+Verwendete Redis-Keys:
+- `config:imap_accounts`: IMAP-Konten für Netlify (Quelle für Scans und Dashboard-Verwaltung).
+- `state:lastSeen:<accountId>`: zuletzt gesehene UID je Konto.
+- `scan:status`: letzter Laufstatus (ok/busy/error + Details).
+- `netlify:phishing-scan:global`: Lease/Lock gegen parallele Läufe.
+- `health:alert_armed`: Health-Alert-Status (für späteren Alarm-Modus).
+
 Schritte:
 1. Bei Upstash eine Redis-DB anlegen.
 2. Aus den DB-Details kopieren:
@@ -127,7 +134,6 @@ Schritte:
 
 Pflicht:
 - `AI_API_KEY`
-- `IMAP_ACCOUNTS` (JSON-Array mit 1..n Konten)
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
 
@@ -135,32 +141,6 @@ Empfohlen:
 - `LOG_LEVEL=0` (minimales Logging)
 - `SCAN_MAX_MESSAGES_PER_TICK=25`
 - `SCAN_LEASE_TTL_SECONDS=900`
-
-Beispiel für `IMAP_ACCOUNTS`:
-
-```json
-[
-  {
-    "id": "acc-1",
-    "label": "ralfw",
-    "server": "imap.example.com:993",
-    "user": "info@example.com",
-    "password": "secret",
-    "folder": "INBOX",
-    "phishingTreatment": "flag",
-    "phishingThreshold": 0.5
-  },
-  {
-    "id": "acc-2",
-    "label": "ralf@wwe",
-    "server": "imaps://mail.example.net:993",
-    "user": "info@example.net",
-    "password": "secret2",
-    "folder": "INBOX",
-    "phishingTreatment": "move_to_phishing_folder"
-  }
-]
-```
 
 ### 4) Verifizieren per curl
 
@@ -220,7 +200,7 @@ Auf der Seite:
 
 Wichtig:
 - Die IMAP-Konten für Netlify-Scans kommen aus Redis (`config:imap_accounts`).
-- Beim ersten Start werden sie einmalig aus `IMAP_ACCOUNTS` übernommen (Bootstrap).
+- Konten werden im Dashboard gepflegt (`Neu`, `Bearbeiten`, `Löschen`).
 
 ### 5) Logs verstehen
 
