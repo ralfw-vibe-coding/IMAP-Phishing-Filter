@@ -4,8 +4,8 @@ type HandlerResponse = { statusCode: number; body: string };
 type Handler = () => Promise<HandlerResponse>;
 
 export const config = {
-  // every 2 minutes
-  schedule: "*/2 * * * *",
+  // every 5 minutes
+  schedule: "*/5 * * * *",
 };
 
 export const handler: Handler = async () => {
